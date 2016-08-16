@@ -106,8 +106,7 @@ object Tags {
   final val JumpCf        = 1 + RetCf
   final val IfCf          = 1 + JumpCf
   final val SwitchCf      = 1 + IfCf
-  final val InvokeCf      = 1 + SwitchCf
-  final val ThrowCf       = 1 + InvokeCf
+  final val ThrowCf       = 1 + SwitchCf
   final val TryCf         = 1 + ThrowCf
 
   // Globals
@@ -122,10 +121,9 @@ object Tags {
 
   final val Next = Global + 32
 
-  final val SuccNext  = 1 + Next
-  final val FailNext  = 1 + SuccNext
-  final val LabelNext = 1 + FailNext
+  final val LabelNext = 1 + Next
   final val CaseNext  = 1 + LabelNext
+  final val CatchNext = 1 + CaseNext
 
   // Ops
 

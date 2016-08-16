@@ -154,17 +154,10 @@ trait Pass extends (Seq[Defn] => Seq[Defn]) {
         Cf.If(txVal(v), txNext(thenp), txNext(elsep))
       case Cf.Switch(v, default, cases) =>
         Cf.Switch(txVal(v), txNext(default), cases.map(txNext))
-      case Cf.Invoke(ty, ptrv, argvs, succ, fail) =>
-        Cf.Invoke(txType(ty),
-                  txVal(ptrv),
-                  argvs.map(txVal),
-                  txNext(succ),
-                  txNext(fail))
-
       case Cf.Throw(v) =>
         Cf.Throw(txVal(v))
-      case Cf.Try(norm, exc) =>
-        Cf.Try(txNext(norm), txNext(exc))
+      case Cf.Try(norm, cases) =>
+        Cf.Try(txNext(norm), cases.map(txNext))
     }
 
     hook(postCf, post, post)
@@ -201,10 +194,9 @@ trait Pass extends (Seq[Defn] => Seq[Defn]) {
   private def txNext(next: Next): Next = {
     val pre = hook(preNext, next, next)
     val post = pre match {
-      case succ: Next.Succ     => succ
-      case fail: Next.Fail     => fail
       case Next.Label(n, args) => Next.Label(n, args.map(txVal))
       case Next.Case(v, n)     => Next.Case(txVal(v), n)
+      case Next.Catch(ty, n)   => Next.Catch(txType(ty), n)
     }
 
     hook(postNext, post, post)

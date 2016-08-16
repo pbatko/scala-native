@@ -200,7 +200,7 @@ lazy val scalalib =
     settings(libSettings).
     settings(publishSettings).
     settings(
-      assembleScalaLibrary := {
+      assembleScalaLibrary := {/*
         import org.eclipse.jgit.api._
 
         val s = streams.value
@@ -234,7 +234,7 @@ lazy val scalalib =
         IO.copyDirectory(
           file(s"scalalib/overrides-$epoch.$major/scala"),
           file("scalalib/src/main/scala/scala"), overwrite = true)
-      },
+      */},
 
       scalafmtTest := {},
 

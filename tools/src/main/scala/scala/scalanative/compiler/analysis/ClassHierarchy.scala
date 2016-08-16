@@ -86,6 +86,15 @@ object ClassHierarchy {
 
     lazy val vtableValue: Val.Struct = Val.Struct(Global.None, vtable)
 
+    lazy val classStruct: Type.Struct = {
+      val data            = allfields.map(_.ty)
+      val classStructName = name tag "class"
+      val classStructBody = Type.Ptr +: data
+      val classStructTy   = Type.Struct(classStructName, classStructBody)
+
+      Type.Struct(classStructName, classStructBody)
+    }
+
     lazy val typeStruct: Type.Struct =
       Type.Struct(Global.None, Seq(Type.I32, Type.Ptr, vtableStruct))
 

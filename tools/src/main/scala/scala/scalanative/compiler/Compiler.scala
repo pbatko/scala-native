@@ -1,8 +1,9 @@
 package scala.scalanative
 package compiler
 
+import java.nio.ByteBuffer
 import scala.collection.mutable
-import codegen.{GenTextualLLVM, GenTextualNIR}
+import codegen.LLCodeGen
 import linker.Linker
 import nir._, Shows._
 import nir.serialization._
@@ -19,16 +20,10 @@ final class Compiler(opts: Opts) {
       pass.ExternHoisting,
       pass.ModuleLowering,
       pass.RuntimeTypeInfoInjection,
-      pass.AsLowering,
-      pass.TraitLowering,
-      pass.ClassLowering,
       pass.StringLowering,
       pass.ConstLowering,
-      pass.SizeofLowering,
       pass.UnitLowering,
-      pass.ThrowLowering,
       pass.NothingLowering,
-      pass.TryLowering,
       pass.StackallocHoisting,
       pass.CopyPropagation)
 
@@ -41,25 +36,26 @@ final class Compiler(opts: Opts) {
     (links, defns ++ injects)
   }
 
-  private lazy val passes = {
-    val ctx = Ctx(fresh = Fresh("tx"),
-                  entry = entry,
-                  top = analysis.ClassHierarchy(assembly))
+  private lazy val ctx = Ctx(fresh = Fresh("tx"),
+                             entry = entry,
+                             top = analysis.ClassHierarchy(assembly))
 
-    passCompanions.map(_.apply(ctx))
-  }
+  private lazy val passes = passCompanions.map(_.apply(ctx))
 
   private def codegen(assembly: Seq[Defn]): Unit = {
-    val gen = new GenTextualLLVM(assembly)
-    serializeFile((defns, bb) => gen.gen(bb), assembly, opts.outpath)
+    def serialize(defns: Seq[Defn], bb: ByteBuffer): Unit = {
+      val gen = new LLCodeGen(assembly)(ctx.top)
+      gen.gen(bb)
+    }
+    serializeFile(serialize _, assembly, opts.outpath)
   }
 
   private def debug(assembly: Seq[Defn], suffix: String) =
     if (opts.verbose) {
-      val gen = new GenTextualNIR(assembly)
-      serializeFile((defns, bb) => gen.gen(bb),
-                    assembly,
-                    opts.outpath + s".$suffix.hnir")
+      def serialize(defns: Seq[Defn], bb: ByteBuffer): Unit = {
+        bb.put(nir.Shows.showDefns(assembly).toString.getBytes)
+      }
+      serializeFile(serialize _, assembly, opts.outpath + s".$suffix.hnir")
     }
 
   def apply(): Seq[Attr.Link] = {
