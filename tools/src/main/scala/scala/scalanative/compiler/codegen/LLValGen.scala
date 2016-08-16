@@ -6,9 +6,16 @@ import java.{lang => jl}
 import util.{unsupported, unreachable, sh, Show}
 import util.Show.{Sequence => s, Indent => i, Unindent => ui, Repeat => r, Newline => nl}
 import nir._
+import compiler.pass.MainInjection.unit
 
 trait LLValGen { self: LLCodeGen =>
-  import LLValGen._
+  private def llvmFloatHex(value: Float): String =
+    "0x" + jl.Long.toHexString(jl.Double.doubleToRawLongBits(value.toDouble))
+
+  private def llvmDoubleHex(value: Double): String =
+    "0x" + jl.Long.toHexString(jl.Double.doubleToRawLongBits(value))
+
+  private def quoted(sh: Res) = s("\"", sh, "\"")
 
   protected lazy val globals = assembly.collect {
     case Defn.Var(_, n, ty, _)     => n -> ty
@@ -18,6 +25,7 @@ trait LLValGen { self: LLCodeGen =>
   }.toMap
 
   def genJustVal(v: Val): Res = v match {
+    case Val.Unit                            => genJustVal(unit)
     case Val.True                            => "true"
     case Val.False                           => "false"
     case Val.Zero(ty)                        => "zeroinitializer"
@@ -54,14 +62,4 @@ trait LLValGen { self: LLCodeGen =>
   implicit val genLocal: Show[Local] = Show {
     case Local(scope, id) => sh"$scope.$id"
   }
-}
-
-object LLValGen {
-  def llvmFloatHex(value: Float): String =
-    "0x" + jl.Long.toHexString(jl.Double.doubleToRawLongBits(value.toDouble))
-
-  def llvmDoubleHex(value: Double): String =
-    "0x" + jl.Long.toHexString(jl.Double.doubleToRawLongBits(value))
-
-  def quoted(sh: Res) = s("\"", sh, "\"")
 }

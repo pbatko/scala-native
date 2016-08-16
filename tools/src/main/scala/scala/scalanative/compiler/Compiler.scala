@@ -14,16 +14,12 @@ final class Compiler(opts: Opts) {
     Global.Member(Global.Top(opts.entry), "main_class.ssnr.ObjectArray_unit")
 
   private lazy val passCompanions: Seq[PassCompanion] = Seq(
-      pass.LocalBoxingElimination,
-      pass.DeadCodeElimination,
       pass.MainInjection,
       pass.ExternHoisting,
       pass.ModuleLowering,
       pass.RuntimeTypeInfoInjection,
       pass.StringLowering,
       pass.ConstLowering,
-      pass.UnitLowering,
-      pass.NothingLowering,
       pass.StackallocHoisting,
       pass.CopyPropagation)
 

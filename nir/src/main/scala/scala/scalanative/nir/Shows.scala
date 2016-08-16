@@ -254,7 +254,6 @@ object Shows {
 
   implicit val showType: Show[Type] = Show {
     case Type.None                     => unreachable
-    case Type.Void                     => "void"
     case Type.Vararg                   => "..."
     case Type.Ptr                      => "ptr"
     case Type.Bool                     => "bool"

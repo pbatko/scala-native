@@ -36,20 +36,17 @@ object ControlFlow {
 
     lazy val eh: Map[Local, Option[Local]] = {
       val exchandler = mutable.Map.empty[Local, Option[Local]]
-      var curhandler: Option[Local] = None
+      val blocks     = toSeq.map(_.block)
 
-      val nblocks = toSeq.foreach { node =>
-        val block = node.block
+      blocks.foreach { block =>
+        val cur = exchandler.get(block.name).flatten
 
-        exchandler.get(block.name).foreach { h =>
-          curhandler = h
-        }
-
+        exchandler(block.name) = cur
         block.cf match {
           case Cf.Try(succ, catches) =>
             exchandler(succ.name) = Some(block.name)
             catches.foreach { ctch =>
-              exchandler(ctch.name) = curhandler
+              exchandler(ctch.name) = cur
             }
           case _ =>
             ()

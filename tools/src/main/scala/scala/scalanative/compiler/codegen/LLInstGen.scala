@@ -16,6 +16,7 @@ trait LLInstGen { self: LLCodeGen =>
   import self.{instanceTy => ity, instance => ival, dispatchTy => dty, dispatch => dval}
 
   private lazy val ty = genType(Rt.Type)
+  private lazy val unit = genJustVal(Val.Unit)
 
   protected lazy val copy = mutable.Map.empty[Local, Val]
 
@@ -37,8 +38,8 @@ trait LLInstGen { self: LLCodeGen =>
   private def genBlocks(implicit cfg: CFG): Seq[Res] = {
     val nodes = cfg.toSeq
     val insts = nodes.map { node =>
-      val Block(_, _, insts, cf) = node.block
-      r(genInsts(insts, cf).map(i(_)))
+      val block = node.block
+      r(genInsts(block).map(i(_)))
     }
 
     insts.zip(nodes).map {
@@ -53,11 +54,13 @@ trait LLInstGen { self: LLCodeGen =>
           val preds = pred.map {
             case ControlFlow.Edge(from, _, _: Next.Case) =>
               (sh"%${from.block.name}", Seq())
+
             case ControlFlow.Edge(from, _, Next.Label(_, vals)) =>
               (sh"%${from.block.name}", vals.map(genJustVal))
+
             case ControlFlow.Edge(from, _, ctch: Next.Catch) =>
               val n = from.block.cf.asInstanceOf[Cf.Try].catches.indexOf(ctch)
-              (sh"%${from.block.name}.catch.$n",
+              (sh"%${from.block.name}.catch.$n.succ",
                Seq(sh"%${from.block.name}.exc"))
           }
 
@@ -85,12 +88,14 @@ trait LLInstGen { self: LLCodeGen =>
     val recid, reccmp   = fresh()
     val wrap0, wrap1    = fresh()
 
-    val fails = cf.catches.drop(1).map(ctch => sh(ctch.name)) :+ resume
+    val fails = (1 to cf.catches.length).tail.map { n =>
+      sh"$in.catch.${n - 1}"
+    } :+ resume
     val catches = cf.catches
       .zip(fails)
       .zipWithIndex
       .collect {
-        case ((Next.Catch(ty, succ), fail), n) =>
+        case ((ctch @ Next.Catch(ty, succ), fail), n) =>
           val catchn = sh"$in.catch.$n"
           val cond   = fresh()
 
@@ -99,7 +104,7 @@ trait LLInstGen { self: LLCodeGen =>
                   nl(sh"$catchn:")
               ),
               withResBuf { buf =>
-                genIs(buf, sh"%$cond =", ty, sh"i8* %$exc")
+                genIs(buf, sh"%$cond = ", ty, sh"i8* %$exc")
                 buf.map(i(_))
               },
               Seq(
@@ -129,30 +134,30 @@ trait LLInstGen { self: LLCodeGen =>
     ) ++ catches
   }
 
-  def genInsts(insts: Seq[Inst], cf: Cf)(implicit cfg: CFG): Seq[Res] =
+  def genInsts(block: Block)(implicit cfg: CFG): Seq[Res] =
     withResBuf { buf =>
-      insts.foreach { inst =>
-        genInst(buf, inst.name, inst.op)
+      val eh = cfg.eh(block.name)
+      block.insts.foreach { inst =>
+        genInst(buf, inst.name, inst.op, eh)
       }
-      genCf(buf, cf)
+      genCf(buf, block.cf, block.name, cfg.eh(block.name))
       buf
     }
 
-  def genInst(buf: ResBuf, name: Local, op: Op): Unit = {
-    val bind = if (isVoid(op.resty)) s() else sh"%$name = "
+  def genInst(buf: ResBuf, name: Local, op: Op, eh: Option[Local]): Unit = {
+    val bind =
+      if (op.resty.isUnit) {
+        copy(name) = Val.Unit
+        s()
+      } else if (op.resty.isNothing) {
+        s()
+      } else {
+        sh"%$name = "
+      }
 
     op match {
-      case op @ Op.Call(_, Val.Local(n, _), _) if copy.contains(n) =>
-        genInst(buf, name, op.copy(ptr = copy(n)))
-
-      case Op.Call(ty, Val.Global(pointee, _), args) =>
-        buf += sh"${bind}call $ty @$pointee(${r(args, sep = ", ")})"
-
       case Op.Call(ty, ptr, args) =>
-        val pointee = fresh()
-
-        buf += sh"%$pointee = bitcast $ptr to $ty*"
-        buf += sh"${bind}call $ty %$pointee(${r(args, sep = ", ")})"
+        genCall(buf, bind, ty, ptr, args, eh)
 
       case Op.Load(ty, ptr) =>
         val pointee = fresh()
@@ -164,7 +169,7 @@ trait LLInstGen { self: LLCodeGen =>
         val pointee = fresh()
 
         buf += sh"%$pointee = bitcast $ptr to $ty*"
-        buf += sh"${bind}store $value, $ty* %$pointee"
+        buf += sh"store $value, $ty* %$pointee"
 
       case Op.Elem(ty, ptr, indexes) =>
         val pointee = fresh()
@@ -231,7 +236,7 @@ trait LLInstGen { self: LLCodeGen =>
         val size  = fresh()
         val clsty = cls.typeConst
 
-        genInst(buf, size, Op.Sizeof(cls.classStruct))
+        genInst(buf, size, Op.Sizeof(cls.classStruct), eh)
         buf += sh"${bind}call i8* @scalanative_alloc($clsty, i64 %$size)"
 
       case Op.Field(ty, obj, FieldRef(cls: Class, fld)) =>
@@ -314,6 +319,35 @@ trait LLInstGen { self: LLCodeGen =>
     }
   }
 
+  def genCall(buf: ResBuf,
+              bind: Res,
+              ty: Type,
+              ptr: Val,
+              args: Seq[Val],
+              eh: Option[Local]): Unit = {
+    val Type.Function(_, resty) = ty
+    val pointee = ptr match {
+      case Val.Local(n, _) if copy.contains(n) =>
+        return genCall(buf, bind, ty, copy(n), args, eh)
+
+      case Val.Global(pointee, _) =>
+        sh"@$pointee"
+
+      case _ =>
+        val cast = fresh()
+        buf += sh"%$cast = bitcast $ptr to $ty*"
+        sh"%$cast"
+    }
+    val sig = sh"$ty $pointee(${r(args, sep = ", ")})"
+
+    //eh.fold {
+    buf += sh"${bind}call $sig"
+    //  buf += sh"br $succ"
+    //} { fail =>
+    //  buf += sh"${bind}invoke $sig to $succ unwind label %$fail.landingpad"
+    //}
+  }
+
   def genIs(buf: ResBuf, bind: Res, ofty: Type, obj: Res): Unit = ofty match {
     case ClassRef(cls) =>
       val typtrptr, typtr = fresh()
@@ -348,7 +382,8 @@ trait LLInstGen { self: LLCodeGen =>
       buf += sh"${bind}load i1, i1* %$boolptr"
   }
 
-  def genCf(buf: ResBuf, cf: Cf)(implicit cfg: CFG) =
+  def genCf(buf: ResBuf, cf: Cf, in: Local, eh: Option[Local])(
+      implicit cfg: CFG) =
     cf match {
       case Cf.Unreachable =>
         buf += "unreachable"
@@ -374,9 +409,6 @@ trait LLInstGen { self: LLCodeGen =>
 
       case Cf.Try(default, cases) =>
         buf += sh"br $default"
-
-      case cf =>
-        unsupported(cf)
     }
 
   implicit val genNext: Show[Next] = Show {
@@ -397,9 +429,6 @@ object LLInstGen {
 
   val typeid =
     sh"call i32 @llvm.eh.typeid.for(i8* bitcast ({ i8*, i8*, i8* }* @_ZTIN11scalanative16ExceptionWrapperE to i8*))"
-
-  def isVoid(ty: Type): Boolean =
-    ty == Type.Void || ty == Type.Unit || ty == Type.Nothing
 
   object Of {
     def unapply(v: Val): Some[(Val, Type)] = Some((v, v.ty))
