@@ -9,190 +9,137 @@ import nir._
 import compiler.analysis._
 import ClassHierarchy._
 import ClassHierarchyExtractors._
-import ControlFlow.{Graph => CFG}
 
 trait LLInstGen { self: LLCodeGen =>
   import LLInstGen._
   import self.{instanceTy => ity, instance => ival, dispatchTy => dty, dispatch => dval}
 
-  private lazy val ty = genType(Rt.Type)
+  private lazy val ll   = new LLBuilder
+  private lazy val ty   = genType(Rt.Type)
   private lazy val unit = genJustVal(Val.Unit)
 
   protected lazy val copy = mutable.Map.empty[Local, Val]
 
+  private def terminate(): Nothing =
+    throw Terminate
+  private def terminating(f: => Unit): Unit =
+    try f
+    catch {
+      case Terminate => ()
+    }
+
   def genBlocks(blocks: Seq[Block]): Seq[Res] = {
-    implicit val cfg = ControlFlow(blocks)
+    ll.start()
 
-    val blockshows = genBlocks(cfg)
-    val landingpadshows: Seq[Res] = cfg.map { node =>
-      node.block match {
-        case Block(n, _, _, cf: Cf.Try) => genLandingPad(n, cf)
-        case _                          => Seq()
-      }
-    }.flatten
-    copy.clear
+    blocks.foreach {
+      case block @ Block(name, params, insts, cf) =>
+        val pairs = params.map { case Val.Local(n, ty) => (n, (ty: Res)) }
 
-    blockshows ++ landingpadshows
-  }
-
-  private def genBlocks(implicit cfg: CFG): Seq[Res] = {
-    val nodes = cfg.toSeq
-    val insts = nodes.map { node =>
-      val block = node.block
-      r(genInsts(block).map(i(_)))
-    }
-
-    insts.zip(nodes).map {
-      case (insts, node) =>
-        val Block(name, params, _, _) = node.block
-
-        val pred    = node.pred
-        val isEntry = node eq cfg.entry
-        val phis = if (isEntry) {
-          Seq()
-        } else {
-          val preds = pred.map {
-            case ControlFlow.Edge(from, _, _: Next.Case) =>
-              (sh"%${from.block.name}", Seq())
-
-            case ControlFlow.Edge(from, _, Next.Label(_, vals)) =>
-              (sh"%${from.block.name}", vals.map(genJustVal))
-
-            case ControlFlow.Edge(from, _, ctch: Next.Catch) =>
-              val n = from.block.cf.asInstanceOf[Cf.Try].catches.indexOf(ctch)
-              (sh"%${from.block.name}.catch.$n.succ",
-               Seq(sh"%${from.block.name}.exc"))
+        ll.block(name, pairs, isEntry = block eq blocks.head)
+        terminating {
+          insts.foreach { inst =>
+            genInst(inst.name, inst.op)
           }
-
-          params.zipWithIndex.map {
-            case (Val.Local(name, ty), n) =>
-              val froms = preds.map {
-                case (from, shows) =>
-                  sh"[${shows(n)}, $from]"
-              }
-
-              i(sh"%$name = phi $ty ${r(froms, sep = ", ")}")
-          }
+          genCf(cf)
         }
-
-        sh"${nl(name)}:${r(phis)}$insts"
     }
+
+    blocks.foreach {
+      case Block(n, _, _, cf: Cf.Try) => genLandingPad(n, cf)
+      case _                          => Seq()
+    }
+
+    copy.clear()
+    ll.end()
   }
 
-  private def genLandingPad(in: Local, cf: Cf.Try)(
-      implicit cfg: CFG): Seq[Res] = {
-    val landingpad      = sh"$in.landingpad"
-    val resume          = sh"$in.resume"
-    val exc             = sh"$in.exc"
+  private def genLandingPad(in: Local, cf: Cf.Try): Unit = {
+    val landingpad      = in tag "landingpad"
+    val resume          = in tag "resume"
+    val exc             = in tag "exc"
     val rec, rec0, rec1 = fresh()
     val recid, reccmp   = fresh()
     val wrap0, wrap1    = fresh()
 
+    ll.block(landingpad)
+    ll.inst(rec, LLInstGen.landingpad)
+    ll.inst(rec0, sh"extractvalue $excrecty %$rec, 0")
+    ll.inst(rec1, sh"extractvalue $excrecty %$rec, 1")
+    ll.inst(recid, sh"$typeid")
+    ll.inst(reccmp, sh"icmp eq i32 %$rec1, %$recid")
+    ll.inst(wrap0, sh"bitcast i8* %$rec0 to i8**")
+    ll.inst(wrap1, sh"getelementptr i8*, i8** %$wrap0, i32 1")
+    ll.inst(exc, sh"load i8*, i8** %$wrap1")
+    ll.branch(reccmp, in tag "catch.0", resume)
+
+    ll.block(resume)
+    ll.resume(sh"$excrecty %$rec")
+
     val fails = (1 to cf.catches.length).tail.map { n =>
-      sh"$in.catch.${n - 1}"
+      in tag s"catch.${n-1}"
     } :+ resume
-    val catches = cf.catches
+
+    cf.catches
       .zip(fails)
       .zipWithIndex
-      .collect {
+      .foreach {
         case ((ctch @ Next.Catch(ty, succ), fail), n) =>
-          val catchn = sh"$in.catch.$n"
-          val cond   = fresh()
+          val catchn     = in tag s"catch.$n"
+          val catchnsucc = catchn tag "succ"
+          val cond       = fresh()
 
-          Seq(
-              Seq(
-                  nl(sh"$catchn:")
-              ),
-              withResBuf { buf =>
-                genIs(buf, sh"%$cond = ", ty, sh"i8* %$exc")
-                buf.map(i(_))
-              },
-              Seq(
-                  i(sh"br i1 %$cond, label %$catchn.succ, label %$fail"),
-                  nl(sh"$catchn.succ:"),
-                  i(sh"call i8* @__cxa_begin_catch(i8* %$rec0)"),
-                  i(sh"call void @__cxa_end_catch()"),
-                  i(sh"br label %$succ")
-              )
-          ).flatten
+          ll.block(catchn)
+          genIs(cond, ty, sh("i8* %$exc"))
+          ll.branch(cond, catchnsucc, fail)
+
+          ll.block(catchnsucc)
+          ll.inst(sh"call i8* @__cxa_begin_catch(i8* %$rec0)")
+          ll.inst(sh"call void @__cxa_end_catch()")
+          ll.jump(succ)
       }
-      .flatten
-
-    Seq(
-        nl(sh"$landingpad:"),
-        i(sh"%$rec = ${LLInstGen.landingpad}"),
-        i(sh"%$rec0 = extractvalue $excrecty %$rec, 0"),
-        i(sh"%$rec1 = extractvalue $excrecty %$rec, 1"),
-        i(sh"%$recid = $typeid"),
-        i(sh"%$reccmp = icmp eq i32 %$rec1, %$recid"),
-        i(sh"%$wrap0 = bitcast i8* %$rec0 to i8**"),
-        i(sh"%$wrap1 = getelementptr i8*, i8** %$wrap0, i32 1"),
-        i(sh"%$exc = load i8*, i8** %$wrap1"),
-        i(sh"br i1 %$reccmp, label %$in.catch.0, label %$resume"),
-        nl(sh"$resume:"),
-        i(sh"resume $excrecty %$rec")
-    ) ++ catches
   }
 
-  def genInsts(block: Block)(implicit cfg: CFG): Seq[Res] =
-    withResBuf { buf =>
-      val eh = cfg.eh(block.name)
-      block.insts.foreach { inst =>
-        genInst(buf, inst.name, inst.op, eh)
-      }
-      genCf(buf, block.cf, block.name, cfg.eh(block.name))
-      buf
+  def genInst(name: Local, op: Op): Unit = {
+    if (op.resty.isUnit) {
+      copy(name) = Val.Unit
     }
-
-  def genInst(buf: ResBuf, name: Local, op: Op, eh: Option[Local]): Unit = {
-    val bind =
-      if (op.resty.isUnit) {
-        copy(name) = Val.Unit
-        s()
-      } else if (op.resty.isNothing) {
-        s()
-      } else {
-        sh"%$name = "
-      }
 
     op match {
       case Op.Call(ty, ptr, args) =>
-        genCall(buf, bind, ty, ptr, args, eh)
+        genCall(name, ty, ptr, args)
 
       case Op.Load(ty, ptr) =>
         val pointee = fresh()
 
-        buf += sh"%$pointee = bitcast $ptr to $ty*"
-        buf += sh"${bind}load $ty, $ty* %$pointee"
+        ll.inst(pointee, sh"bitcast $ptr to $ty*")
+        ll.inst(name, sh"load $ty, $ty* %$pointee")
 
       case Op.Store(ty, ptr, value) =>
         val pointee = fresh()
 
-        buf += sh"%$pointee = bitcast $ptr to $ty*"
-        buf += sh"store $value, $ty* %$pointee"
+        ll.inst(pointee, sh"bitcast $ptr to $ty*")
+        ll.inst(sh"store $value, $ty* %$pointee")
 
       case Op.Elem(ty, ptr, indexes) =>
-        val pointee = fresh()
-        val derived = fresh()
+        val pointee, derived = fresh()
 
-        buf += sh"%$pointee = bitcast $ptr to $ty*"
-        buf +=
-        sh"%$derived = getelementptr $ty, $ty* %$pointee, ${r(indexes, sep = ", ")}"
-        buf +=
-        sh"${bind}bitcast ${ty.elemty(indexes.tail)}* %$derived to i8*"
+        ll.inst(pointee, sh"bitcast $ptr to $ty*")
+        ll.inst(derived,
+                sh"getelementptr $ty, $ty* %$pointee, ${r(indexes, sep = ", ")}")
+        ll.inst(name, sh"bitcast ${ty.elemty(indexes.tail)}* %$derived to i8*")
 
       case Op.Stackalloc(ty, n) =>
         val pointee = fresh()
         val elems   = if (n == Val.None) sh"" else sh", $n"
 
-        buf += sh"%$pointee = alloca $ty$elems"
-        buf += sh"${bind}bitcast $ty* %$pointee to i8*"
+        ll.inst(pointee, sh"alloca $ty$elems")
+        ll.inst(name, sh"bitcast $ty* %$pointee to i8*")
 
       case Op.Extract(aggr, indexes) =>
-        buf += sh"${bind}extractvalue $aggr, ${r(indexes, sep = ", ")}"
+        ll.inst(name, sh"extractvalue $aggr, ${r(indexes, sep = ", ")}")
 
       case Op.Insert(aggr, value, indexes) =>
-        buf += sh"${bind}insertvalue $aggr, $value, ${r(indexes, sep = ", ")}"
+        ll.inst(name, sh"insertvalue $aggr, $value, ${r(indexes, sep = ", ")}")
 
       case Op.Bin(opcode, ty, l, r) =>
         val bin = opcode match {
@@ -202,7 +149,7 @@ trait LLInstGen { self: LLCodeGen =>
           case _        => opcode.toString.toLowerCase
         }
 
-        buf += sh"${bind}$bin $l, ${genJustVal(r)}"
+        ll.inst(name, sh"$bin $l, ${genJustVal(r)}")
 
       case Op.Comp(opcode, ty, l, r) =>
         val cmp = opcode match {
@@ -224,41 +171,43 @@ trait LLInstGen { self: LLCodeGen =>
           case Comp.Fge => "fcmp uge"
         }
 
-        buf += sh"${bind}$cmp $l, ${genJustVal(r)}"
+        ll.inst(name, sh"$cmp $l, ${genJustVal(r)}")
 
-      case Op.Conv(name, ty, v) =>
-        buf += sh"${bind}$name $v to $ty"
+      case Op.Conv(opcode, ty, v) =>
+        ll.inst(name, sh"$opcode $v to $ty")
 
       case Op.Select(cond, v1, v2) =>
-        buf += sh"${bind}select $cond, $v1, $v2"
+        ll.inst(name, sh"select $cond, $v1, $v2")
 
       case Op.Classalloc(ClassRef(cls)) =>
         val size  = fresh()
         val clsty = cls.typeConst
 
-        genInst(buf, size, Op.Sizeof(cls.classStruct), eh)
-        buf += sh"${bind}call i8* @scalanative_alloc($clsty, i64 %$size)"
+        genInst(size, Op.Sizeof(cls.classStruct))
+        ll.inst(name, sh"call i8* @scalanative_alloc($clsty, i64 %$size)")
 
       case Op.Field(ty, obj, FieldRef(cls: Class, fld)) =>
         val typtr, fieldptr = fresh()
-        val ty              = cls.classStruct: Type
-        val index           = sh"i32 ${fld.index + 1}"
 
-        buf += sh"%$typtr = bitcast $obj to $ty*"
-        buf += sh"%$fieldptr = getelementptr $ty, $ty* %$typtr, i32 0, $index"
-        buf += sh"${bind}bitcast ${fld.ty}* %$fieldptr to i8*"
+        val ty    = cls.classStruct: Type
+        val index = sh"i32 ${fld.index + 1}"
 
-      case Op.Method(sig, obj, MethodRef(cls: Class, meth))
-          if meth.isVirtual =>
+        ll.inst(typtr, sh"bitcast $obj to $ty*")
+        ll.inst(fieldptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, $index")
+        ll.inst(name, sh"bitcast ${fld.ty}* %$fieldptr to i8*")
+
+      case Op.Method(sig, obj, MethodRef(cls: Class, meth)) if meth.isVirtual =>
         val typtrptr, typtr, methptrptr = fresh()
 
         val ty    = cls.typeStruct: Type
         val index = sh"i32 ${meth.vindex}"
 
-        buf += sh"%$typtrptr = bitcast $obj to $ty**"
-        buf += sh"%$typtr = load $ty*, $ty** %$typtrptr"
-        buf += sh"%$methptrptr = getelementptr $ty, $ty* %$typtr, i32 0, i32 2, $index"
-        buf += sh"${bind}load i8*, i8** %$methptrptr"
+        ll.inst(typtrptr, sh"bitcast $obj to $ty**")
+        ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
+        ll.inst(
+            methptrptr,
+            sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 2, $index")
+        ll.inst(name, sh"load i8*, i8** %$methptrptr")
 
       case Op.Method(sig, obj, MethodRef(_: Class, meth)) if meth.isStatic =>
         copy(name) = Val.Global(meth.name, Type.Ptr)
@@ -268,21 +217,21 @@ trait LLInstGen { self: LLCodeGen =>
 
         val mid = sh"i32 ${meth.id}"
 
-        buf += sh"%$typtrptr = bitcast $obj to $ty**"
-        buf += sh"%$typtr = load $ty*, $ty** %$typtrptr"
-        buf += sh"%$idptr = getelementptr $ty, $ty* %$typtr, i32 0, i32 0"
-        buf += sh"%$id = load i32, i32* %$idptr"
-        buf += sh"%$methptrptr = getelementptr $dty, $dval, i32 0, i32 %$id, $mid"
-        buf += sh"${bind}load i8*, i8** %$methptrptr"
+        ll.inst(typtrptr, sh"bitcast $obj to $ty**")
+        ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
+        ll.inst(idptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 0")
+        ll.inst(id, sh"load i32, i32* %$idptr")
+        ll.inst(methptrptr, sh"getelementptr $dty, $dval, i32 0, i32 %$id, $mid")
+        ll.inst(name, sh"load i8*, i8** %$methptrptr")
 
       case Op.Sizeof(ty) =>
         val elem = fresh()
 
-        buf += sh"%$elem = getelementptr $ty, $ty* null, i32 1"
-        buf += sh"${bind}ptrtoint $ty* %$elem to i64"
+        ll.inst(elem, sh"getelementptr $ty, $ty* null, i32 1")
+        ll.inst(name, sh"ptrtoint $ty* %$elem to i64")
 
       case Op.Is(ty, value) =>
-        genIs(buf, bind, ty, genVal(value))
+        genIs(name, ty, genVal(value))
 
       case Op.As(ty1, Of(v, ty2)) if ty1 == ty2 =>
         copy(name) = v
@@ -291,124 +240,117 @@ trait LLInstGen { self: LLCodeGen =>
         copy(name) = v
 
       case Op.As(to @ Type.I(w1), Of(v, Type.I(w2))) if w1 > w2 =>
-        buf += sh"${bind}sext $v to ${to: Type}"
+        ll.inst(name, sh"sext $v to ${to: Type}")
 
       case Op.As(to @ Type.I(w1), Of(v, Type.I(w2))) if w1 < w2 =>
-        buf += sh"${bind}trunc $v to ${to: Type}"
+        ll.inst(name, sh"trunc $v to ${to: Type}")
 
       case Op.As(to @ Type.I(_), Of(v, Type.F(_))) =>
-        buf += sh"${bind}fptosi $v to ${to: Type}"
+        ll.inst(name, sh"fptosi $v to ${to: Type}")
 
       case Op.As(to @ Type.F(_), Of(v, Type.I(_))) =>
-        buf += sh"${bind}sitofp $v to ${to: Type}"
+        ll.inst(name, sh"sitofp $v to ${to: Type}")
 
       case Op.As(to @ Type.F(w1), Of(v, Type.F(w2))) if w1 > w2 =>
-        buf += sh"${bind}fpext $v to ${to: Type}"
+        ll.inst(name, sh"fpext $v to ${to: Type}")
 
       case Op.As(to @ Type.F(w1), Of(v, Type.F(w2))) if w1 < w2 =>
-        buf += sh"${bind}fptrunc $v to ${to: Type}"
+        ll.inst(name, sh"fptrunc $v to ${to: Type}")
 
       case Op.As(Type.Ptr, Of(v, _: Type.RefKind)) =>
-        buf += sh"${bind}bitcast $v to i8*"
+        ll.inst(name, sh"bitcast $v to i8*")
 
       case Op.As(to @ (_: Type.RefKind), Of(v, Type.Ptr)) =>
-        buf += sh"${bind}bitcast $v to ${to: Type}"
+        ll.inst(name, sh"bitcast $v to ${to: Type}")
 
       case op =>
         unsupported(op)
     }
   }
 
-  def genCall(buf: ResBuf,
-              bind: Res,
-              ty: Type,
-              ptr: Val,
-              args: Seq[Val],
-              eh: Option[Local]): Unit = {
+  def genCall(name: Local, ty: Type, ptr: Val, args: Seq[Val]): Unit = {
     val Type.Function(_, resty) = ty
     val pointee = ptr match {
       case Val.Local(n, _) if copy.contains(n) =>
-        return genCall(buf, bind, ty, copy(n), args, eh)
-
+        return genCall(name, ty, copy(n), args)
       case Val.Global(pointee, _) =>
         sh"@$pointee"
-
       case _ =>
         val cast = fresh()
-        buf += sh"%$cast = bitcast $ptr to $ty*"
+        ll.inst(cast, sh"bitcast $ptr to $ty*")
         sh"%$cast"
     }
     val sig = sh"$ty $pointee(${r(args, sep = ", ")})"
 
-    //eh.fold {
-    buf += sh"${bind}call $sig"
-    //  buf += sh"br $succ"
-    //} { fail =>
-    //  buf += sh"${bind}invoke $sig to $succ unwind label %$fail.landingpad"
-    //}
+    ll.invoke(sig)
+    if (resty.isNothing) {
+      ll.unreachable()
+      terminate()
+    }
   }
 
-  def genIs(buf: ResBuf, bind: Res, ofty: Type, obj: Res): Unit = ofty match {
+  def genIs(name: Local, ofty: Type, obj: Res): Unit = ofty match {
     case ClassRef(cls) =>
       val typtrptr, typtr = fresh()
 
-      buf += sh"%$typtrptr = bitcast $obj to $ty**"
-      buf += sh"%$typtr = load $ty*, $ty** %$typtrptr"
+      ll.inst(typtrptr, sh"bitcast $obj to $ty**")
+      ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
 
       if (cls.range.length == 1) {
         val typtr1 = fresh()
 
-        buf += sh"%$typtr1 = bitcast $ty* %$typtr to i8*"
-        buf += sh"${bind}icmp eq i8* %$typtr1, ${genJustVal(cls.typeConst)}"
+        ll.inst(typtr1, sh"bitcast $ty* %$typtr to i8*")
+        ll.inst(name, sh"icmp eq i8* %$typtr1, ${genJustVal(cls.typeConst)}")
 
       } else {
         val idptr, id, ge, le = fresh()
 
-        buf += sh"%$idptr = getelementptr $ty, $ty* %$typtr, i32 0, i32 0"
-        buf += sh"%$id = load i32, i32* %$idptr"
-        buf += sh"%$ge = icmp sle i32 ${cls.range.start}, %$id"
-        buf += sh"%$le = icmp sle i32 %$id, ${cls.range.end}"
-        buf += sh"${bind}and i1 %$ge, %$le"
+        ll.inst(idptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 0")
+        ll.inst(id, sh"load i32, i32* %$idptr")
+        ll.inst(ge, sh"icmp sle i32 ${cls.range.start}, %$id")
+        ll.inst(le, sh"icmp sle i32 %$id, ${cls.range.end}")
+        ll.inst(name, sh"and i1 %$ge, %$le")
       }
 
     case TraitRef(trt) =>
       val typtrptr, typtr, idptr, id, boolptr = fresh()
 
-      buf += sh"%$typtrptr = bitcast $obj to $ty**"
-      buf += sh"%$typtr = load $ty*, $ty** %$typtrptr"
-      buf += sh"%$idptr = getelementptr $ty, $ty* %$typtr, i32 0, i32 0"
-      buf += sh"%$id = load i32, i32* %$idptr"
-      buf += sh"%$boolptr = getelementptr $ity, $ival, i32 0, i32 %$id, i32 ${trt.id}"
-      buf += sh"${bind}load i1, i1* %$boolptr"
+      ll.inst(typtrptr, sh"bitcast $obj to $ty**")
+      ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
+      ll.inst(idptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 0")
+      ll.inst(id, sh"load i32, i32* %$idptr")
+      ll.inst(boolptr,
+              sh"getelementptr $ity, $ival, i32 0, i32 %$id, i32 ${trt.id}")
+      ll.inst(name, sh"load i1, i1* %$boolptr")
   }
 
-  def genCf(buf: ResBuf, cf: Cf, in: Local, eh: Option[Local])(
-      implicit cfg: CFG) =
+  def genCf(cf: Cf): Unit =
     cf match {
       case Cf.Unreachable =>
-        buf += "unreachable"
-
-      case Cf.Ret(Val.None) =>
-        buf += sh"ret void"
+        ll.unreachable()
 
       case Cf.Ret(value) =>
-        buf += sh"ret $value"
+        ll.ret(value)
 
-      case Cf.Jump(next) =>
-        buf += sh"br $next"
+      case Cf.Jump(Next.Label(name, values)) =>
+        ll.jump(name, values.map(genJustVal))
 
       case Cf.If(cond, thenp, elsep) =>
-        buf += sh"br $cond, $thenp, $elsep"
+        ll.branch(cond, thenp.name, elsep.name)
 
       case Cf.Switch(scrut, default, cases) =>
-        buf += sh"switch $scrut, $default [${r(cases.map(i(_)))}${nl("]")}"
+        val pairs = cases.map {
+          case Next.Case(v, n) => (s(v), n)
+          case _               => unreachable
+        }
+        ll.switch(scrut, default.name, pairs)
 
       case Cf.Throw(value) =>
-        buf += sh"call void @scalanative_throw($value)"
-        buf += sh"unreachable"
+        ll.inst(sh"call void @scalanative_throw($value)")
+        ll.unreachable()
 
       case Cf.Try(default, cases) =>
-        buf += sh"br $default"
+        ll.jump(default.name)
     }
 
   implicit val genNext: Show[Next] = Show {
@@ -434,3 +376,5 @@ object LLInstGen {
     def unapply(v: Val): Some[(Val, Type)] = Some((v, v.ty))
   }
 }
+
+private[codegen] final case object Terminate extends Exception

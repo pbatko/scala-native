@@ -114,7 +114,7 @@ final case class Focus(
       case (excty, f) =>
         val param = Val.Local(fresh(), Rt.Object)
         val (n, c, b) = wrapBranch(merge, Seq(param)) { focus =>
-          f(focus withOp Op.As(excty, focus.value))
+          f(focus withOp Op.As(excty, param))
         }
         (excty, n, c, b)
     }
