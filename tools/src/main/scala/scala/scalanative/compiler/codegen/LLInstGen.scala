@@ -264,6 +264,9 @@ trait LLInstGen { self: LLCodeGen =>
       case Op.As(to @ (_: Type.RefKind), Of(v, Type.Ptr)) =>
         ll.inst(name, sh"bitcast $v to ${to: Type}")
 
+      case Op.Copy(value) =>
+        copy(name) = value
+
       case op =>
         unsupported(op)
     }

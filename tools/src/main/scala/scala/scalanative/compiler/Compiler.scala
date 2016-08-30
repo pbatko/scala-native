@@ -31,8 +31,7 @@ final class Compiler(opts: Opts) {
       pass.RuntimeTypeInfoInjection,
       pass.StringLowering,
       pass.ConstLowering,
-      pass.StackallocHoisting,
-      pass.CopyPropagation)
+      pass.StackallocHoisting)
 
   private lazy val (links, assembly): (Seq[Attr.Link], Seq[Defn]) =
     measure("linking") {
