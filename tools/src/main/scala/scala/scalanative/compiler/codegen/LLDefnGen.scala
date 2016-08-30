@@ -28,6 +28,13 @@ trait LLDefnGen { self: LLCodeGen =>
        sh"@_ZTIN11scalanative16ExceptionWrapperE = external constant { i8*, i8*, i8* }")
   )
 
+  /** Strips "extern." suffix from the given global. */
+  protected def stripExtern(n: Global): Global = {
+    val id = n.id
+    assert(id.startsWith("extern."))
+    Global.Top(id.substring(7))
+  }
+
   lazy val (dispatchTy, dispatchDefn) = {
     val traitMethods = methods.filter(_.inTrait).sortBy(_.id)
 
@@ -97,6 +104,7 @@ trait LLDefnGen { self: LLCodeGen =>
                     isConst: Boolean,
                     ty: nir.Type,
                     rhs: nir.Val): Unit = {
+    val stripped = if (isExtern) stripExtern(name) else name
     val external = if (isExtern) "external " else ""
     val keyword  = if (isConst) "constant" else "global"
     val tag      = if (isConst) CONST else GLOBAL
@@ -105,7 +113,7 @@ trait LLDefnGen { self: LLCodeGen =>
       case _        => sh"$rhs"
     }
 
-    buf += ((tag, sh"@$name = $external$keyword $init"))
+    buf += ((tag, sh"@$stripped = $external$keyword $init"))
   }
 
   def genFunctionDefn(buf: TaggedResBuf,
@@ -115,9 +123,10 @@ trait LLDefnGen { self: LLCodeGen =>
                       blocks: Seq[Block]): Unit = {
     val Type.Function(argtys, retty) = sig
 
-    val isDecl  = blocks.isEmpty
-    val keyword = if (isDecl) "declare" else "define"
-    val tag     = if (isDecl) DECLARE else DEFINE
+    val stripped = if (attrs.isExtern) stripExtern(name) else name
+    val isDecl   = blocks.isEmpty
+    val keyword  = if (isDecl) "declare" else "define"
+    val tag      = if (isDecl) DECLARE else DEFINE
     val params =
       if (isDecl) r(argtys, sep = ", ")
       else r(blocks.head.params: Seq[Val], sep = ", ")
@@ -131,7 +140,7 @@ trait LLDefnGen { self: LLCodeGen =>
       }
 
     buf += ((tag,
-             sh"$keyword $retty @$name($params)$postattrs$personality$body"))
+             sh"$keyword $retty @$stripped($params)$postattrs$personality$body"))
   }
 
   def genStruct(buf: TaggedResBuf, name: Global, tys: Seq[Type]): Unit =

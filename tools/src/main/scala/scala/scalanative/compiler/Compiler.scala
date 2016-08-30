@@ -26,7 +26,6 @@ final class Compiler(opts: Opts) {
       pass.LocalBoxingElimination,
       pass.DeadCodeElimination,
       pass.MainInjection,
-      pass.ExternHoisting,
       pass.ModuleLowering,
       pass.RuntimeTypeInfoInjection,
       pass.StringLowering,

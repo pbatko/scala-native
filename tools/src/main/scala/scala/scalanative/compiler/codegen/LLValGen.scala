@@ -7,6 +7,7 @@ import util.{unsupported, unreachable, sh, Show}
 import util.Show.{Sequence => s, Indent => i, Unindent => ui, Repeat => r, Newline => nl}
 import nir._
 import compiler.pass.MainInjection.unit
+import compiler.analysis.ClassHierarchyExtractors._
 
 trait LLValGen { self: LLCodeGen =>
   private def llvmFloatHex(value: Float): String =
@@ -41,8 +42,10 @@ trait LLValGen { self: LLCodeGen =>
     case Val.Chars(v)                        => s("c\"", v, "\\00", "\"")
     case Val.Local(n, _) if copy.contains(n) => genJustVal(copy(n))
     case Val.Local(n, ty)                    => sh"%$n"
-    case Val.Global(n, ty)                   => sh"bitcast (${globals(n)}* @$n to i8*)"
-    case _                                   => unsupported(v)
+    case Val.Global(n @ Ref(node), ty) if node.attrs.isExtern =>
+      genJustVal(Val.Global(stripExtern(n), ty))
+    case Val.Global(n, ty) => sh"bitcast (${globals(n)}* @$n to i8*)"
+    case _                 => unsupported(v)
   }
 
   implicit val genVal: Show[Val] = Show { v =>
