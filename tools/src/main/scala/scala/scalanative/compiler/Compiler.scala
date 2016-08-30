@@ -66,7 +66,7 @@ final class Compiler(opts: Opts) {
     serializeFile(serialize _, assembly, opts.outpath + suffix)
   }
 
-  def apply(): Seq[Attr.Link] = {
+  def apply(): Seq[Attr.Link] = measure("total") {
     def loop(assembly: Seq[Defn], passes: Seq[(Pass, Int)]): Seq[Defn] =
       passes match {
         case Seq() =>
