@@ -14,7 +14,7 @@ trait LLInstGen { self: LLCodeGen =>
   import LLInstGen._
   import self.{instanceTy => ity, instance => ival, dispatchTy => dty, dispatch => dval}
 
-  private lazy val ll   = new LLBuilder
+  private lazy val ll   = new LLBuilder(fresh)
   private lazy val ty   = genType(Rt.Type)
   private lazy val unit = genJustVal(Val.Unit)
 
@@ -31,29 +31,31 @@ trait LLInstGen { self: LLCodeGen =>
   def genBlocks(blocks: Seq[Block]): Seq[Res] = {
     ll.start()
 
-    blocks.foreach {
-      case block @ Block(name, params, insts, cf) =>
-        val pairs = params.map { case Val.Local(n, ty) => (n, (ty: Res)) }
+    val cfg = ControlFlow(blocks)
+    cfg.map { node =>
+      val block @ Block(name, params, insts, cf) = node.block
 
-        ll.block(name, pairs, isEntry = block eq blocks.head)
-        terminating {
-          insts.foreach { inst =>
-            genInst(inst.name, inst.op)
-          }
-          genCf(cf)
+      val pairs = params.map { case Val.Local(n, ty) => (n, (ty: Res)) }
+
+      ll.block(name, pairs, isEntry = node eq cfg.entry)
+      terminating {
+        insts.foreach { inst =>
+          genInst(inst.name, inst.op)
         }
-    }
+        genCf(name, cf)
+      }
 
-    blocks.foreach {
-      case Block(n, _, _, cf: Cf.Try) => genLandingPad(n, cf)
-      case _                          => Seq()
+      cf match {
+        case cf: Cf.Try => genLandingPad(name, cf)
+        case _          => ()
+      }
     }
 
     copy.clear()
     ll.end()
   }
 
-  private def genLandingPad(in: Local, cf: Cf.Try): Unit = {
+  def genLandingPad(in: Local, cf: Cf.Try): Unit = {
     val landingpad      = in tag "landingpad"
     val resume          = in tag "resume"
     val exc             = in tag "exc"
@@ -70,33 +72,30 @@ trait LLInstGen { self: LLCodeGen =>
     ll.inst(wrap0, sh"bitcast i8* %$rec0 to i8**")
     ll.inst(wrap1, sh"getelementptr i8*, i8** %$wrap0, i32 1")
     ll.inst(exc, sh"load i8*, i8** %$wrap1")
-    ll.branch(reccmp, in tag "catch.0", resume)
+    ll.branch(sh"i1 %$reccmp", in tag "catch.0", resume)
 
     ll.block(resume)
     ll.resume(sh"$excrecty %$rec")
 
     val fails = (1 to cf.catches.length).tail.map { n =>
-      in tag s"catch.${n-1}"
+      in tag s"catch.${n - 1}"
     } :+ resume
 
-    cf.catches
-      .zip(fails)
-      .zipWithIndex
-      .foreach {
-        case ((ctch @ Next.Catch(ty, succ), fail), n) =>
-          val catchn     = in tag s"catch.$n"
-          val catchnsucc = catchn tag "succ"
-          val cond       = fresh()
+    cf.catches.zip(fails).zipWithIndex.foreach {
+      case ((ctch @ Next.Catch(ty, succ), fail), n) =>
+        val catchn     = in tag s"catch.$n"
+        val catchnsucc = catchn tag "succ"
+        val cond       = fresh()
 
-          ll.block(catchn)
-          genIs(cond, ty, sh("i8* %$exc"))
-          ll.branch(cond, catchnsucc, fail)
+        ll.block(catchn)
+        genIs(cond, ty, sh(sh"i8* %$exc"))
+        ll.branch(sh"i1 %$cond", catchnsucc, fail)
 
-          ll.block(catchnsucc)
-          ll.inst(sh"call i8* @__cxa_begin_catch(i8* %$rec0)")
-          ll.inst(sh"call void @__cxa_end_catch()")
-          ll.jump(succ)
-      }
+        ll.block(catchnsucc)
+        ll.invoke(sh"i8* @__cxa_begin_catch(i8* %$rec0)")
+        ll.invoke(sh"void @__cxa_end_catch()")
+        ll.jump(succ, Seq(sh"%$exc"))
+    }
   }
 
   def genInst(name: Local, op: Op): Unit = {
@@ -124,8 +123,9 @@ trait LLInstGen { self: LLCodeGen =>
         val pointee, derived = fresh()
 
         ll.inst(pointee, sh"bitcast $ptr to $ty*")
-        ll.inst(derived,
-                sh"getelementptr $ty, $ty* %$pointee, ${r(indexes, sep = ", ")}")
+        ll.inst(
+            derived,
+            sh"getelementptr $ty, $ty* %$pointee, ${r(indexes, sep = ", ")}")
         ll.inst(name, sh"bitcast ${ty.elemty(indexes.tail)}* %$derived to i8*")
 
       case Op.Stackalloc(ty, n) =>
@@ -184,7 +184,7 @@ trait LLInstGen { self: LLCodeGen =>
         val clsty = cls.typeConst
 
         genInst(size, Op.Sizeof(cls.classStruct))
-        ll.inst(name, sh"call i8* @scalanative_alloc($clsty, i64 %$size)")
+        ll.invoke(name, sh"i8* @scalanative_alloc($clsty, i64 %$size)")
 
       case Op.Field(ty, obj, FieldRef(cls: Class, fld)) =>
         val typtr, fieldptr = fresh()
@@ -196,7 +196,8 @@ trait LLInstGen { self: LLCodeGen =>
         ll.inst(fieldptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, $index")
         ll.inst(name, sh"bitcast ${fld.ty}* %$fieldptr to i8*")
 
-      case Op.Method(sig, obj, MethodRef(cls: Class, meth)) if meth.isVirtual =>
+      case Op.Method(sig, obj, MethodRef(cls: Class, meth))
+          if meth.isVirtual =>
         val typtrptr, typtr, methptrptr = fresh()
 
         val ty    = cls.typeStruct: Type
@@ -204,9 +205,8 @@ trait LLInstGen { self: LLCodeGen =>
 
         ll.inst(typtrptr, sh"bitcast $obj to $ty**")
         ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
-        ll.inst(
-            methptrptr,
-            sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 2, $index")
+        ll.inst(methptrptr,
+                sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 2, $index")
         ll.inst(name, sh"load i8*, i8** %$methptrptr")
 
       case Op.Method(sig, obj, MethodRef(_: Class, meth)) if meth.isStatic =>
@@ -221,7 +221,8 @@ trait LLInstGen { self: LLCodeGen =>
         ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
         ll.inst(idptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 0")
         ll.inst(id, sh"load i32, i32* %$idptr")
-        ll.inst(methptrptr, sh"getelementptr $dty, $dval, i32 0, i32 %$id, $mid")
+        ll.inst(methptrptr,
+                sh"getelementptr $dty, $dval, i32 0, i32 %$id, $mid")
         ll.inst(name, sh"load i8*, i8** %$methptrptr")
 
       case Op.Sizeof(ty) =>
@@ -282,10 +283,12 @@ trait LLInstGen { self: LLCodeGen =>
     }
     val sig = sh"$ty $pointee(${r(args, sep = ", ")})"
 
-    ll.invoke(sig)
     if (resty.isNothing) {
+      ll.invoke(sig)
       ll.unreachable()
       terminate()
+    } else {
+      ll.invoke(name, sig)
     }
   }
 
@@ -324,7 +327,7 @@ trait LLInstGen { self: LLCodeGen =>
       ll.inst(name, sh"load i1, i1* %$boolptr")
   }
 
-  def genCf(cf: Cf): Unit =
+  def genCf(in: Local, cf: Cf): Unit =
     cf match {
       case Cf.Unreachable =>
         ll.unreachable()
@@ -346,11 +349,11 @@ trait LLInstGen { self: LLCodeGen =>
         ll.switch(scrut, default.name, pairs)
 
       case Cf.Throw(value) =>
-        ll.inst(sh"call void @scalanative_throw($value)")
+        ll.invoke(sh"void @scalanative_throw($value)")
         ll.unreachable()
 
       case Cf.Try(default, cases) =>
-        ll.jump(default.name)
+        ll.jump(default.name, eh = Some(in tag "landingpad"))
     }
 
   implicit val genNext: Show[Next] = Show {

@@ -45,11 +45,9 @@ final class Compiler(opts: Opts) {
       (links, defns ++ injects)
     }
 
-  private lazy val ctx = measure("context creation") {
-    Ctx(fresh = Fresh("tx"),
-        entry = entry,
-        top = analysis.ClassHierarchy(assembly))
-  }
+  private lazy val ctx = Ctx(fresh = Fresh("tx"),
+                             entry = entry,
+                             top = analysis.ClassHierarchy(assembly))
 
   private lazy val passes = passCompanions.map(_.apply(ctx))
 

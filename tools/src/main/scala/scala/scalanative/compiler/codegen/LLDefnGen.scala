@@ -115,8 +115,6 @@ trait LLDefnGen { self: LLCodeGen =>
                       blocks: Seq[Block]): Unit = {
     val Type.Function(argtys, retty) = sig
 
-    println(s"### gen function $name")
-
     val isDecl  = blocks.isEmpty
     val keyword = if (isDecl) "declare" else "define"
     val tag     = if (isDecl) DECLARE else DEFINE

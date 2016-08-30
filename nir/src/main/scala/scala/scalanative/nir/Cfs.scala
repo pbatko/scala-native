@@ -9,6 +9,6 @@ object Cf {
   final case class If(value: Val, thenp: Next, elsep: Next) extends Cf
   final case class Switch(value: Val, default: Next, cases: Seq[Next])
       extends Cf
-  final case class Throw(value: Val)                 extends Cf
+  final case class Throw(value: Val)                   extends Cf
   final case class Try(succ: Next, catches: Seq[Next]) extends Cf
 }

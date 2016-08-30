@@ -7,14 +7,16 @@ import util.{unsupported, unreachable, sh, Show}
 import util.Show.{Sequence => s, Indent => i, Unindent => ui, Repeat => r, Newline => nl, Result => Res}
 import nir._
 
-final class LLBuilder {
-  private val edges  = Map.empty[Local, Buf[(Local, Seq[Res])]]
-  private val blocks = Buf.empty[LLBlock]
+final class LLBuilder(fresh: Fresh) {
+  private val edges    = Map.empty[Local, Buf[(Local, Seq[Res])]]
+  private val blocks   = Buf.empty[LLBlock]
+  private val handlers = Map.empty[Local, Option[Local]]
 
   private var name: Local               = _
   private var params: Seq[(Local, Res)] = _
   private var insts: Buf[Res]           = _
   private var isEntry: Boolean          = _
+  private var handler: Option[Local]    = None
 
   private def edge(to: Local, values: Seq[Res] = Seq.empty): Unit = {
     if (!edges.contains(to)) {
@@ -23,9 +25,14 @@ final class LLBuilder {
     edges(to) += ((name, values))
   }
 
+  private def exchandler(to: Local, handler: Local): Unit =
+    handlers(to) = Some(handler)
+
   def start(): Unit = {
     edges.clear()
     blocks.clear()
+    handlers.clear()
+    handler = None
   }
 
   def end(): Seq[Res] = {
@@ -63,6 +70,7 @@ final class LLBuilder {
     this.params = params
     this.insts = Buf.empty[Res]
     this.isEntry = isEntry
+    this.handler = handlers.getOrElse(name, this.handler)
     blocks += LLBlock(name, params, this.insts, isEntry)
   }
 
@@ -73,11 +81,23 @@ final class LLBuilder {
     insts += sh"%$name = $op"
 
   def invoke(sig: Res): Unit = {
-    insts += sh"call $sig"
+    handler.fold[Unit] {
+      insts += sh"call $sig"
+    } { eh =>
+      val succ = fresh()
+      insts += sh"invoke $sig to label %$succ unwind label %$eh"
+      block(succ)
+    }
   }
 
   def invoke(name: Local, sig: Res): Unit = {
-    insts += sh"%$name = call $sig"
+    handler.fold[Unit] {
+      insts += sh"%$name = call $sig"
+    } { eh =>
+      val succ = fresh()
+      insts += sh"%$name = invoke $sig to label %$succ unwind label %$eh"
+      block(succ)
+    }
   }
 
   def unreachable(): Unit =
@@ -90,14 +110,12 @@ final class LLBuilder {
     insts += sh"resume $value"
   }
 
-  def jump(next: Local): Unit = {
-    insts += sh"br label %$next"
-    edge(next)
-  }
-
-  def jump(next: Local, values: Seq[Res]): Unit = {
+  def jump(next: Local,
+           values: Seq[Res] = Seq.empty,
+           eh: Option[Local] = None): Unit = {
     insts += sh"br label %$next"
     edge(next, values)
+    eh.foreach(exchandler(next, _))
   }
 
   def branch(cond: Res, thenp: Local, elsep: Local): Unit = {
