@@ -88,11 +88,10 @@ object ClassHierarchy {
 
     lazy val classStruct: Type.Struct = {
       val data            = allfields.map(_.ty)
-      val classStructName = name tag "class"
       val classStructBody = Type.Ptr +: data
-      val classStructTy   = Type.Struct(classStructName, classStructBody)
+      val classStructTy   = Type.Struct(name, classStructBody)
 
-      Type.Struct(classStructName, classStructBody)
+      Type.Struct(name, classStructBody)
     }
 
     lazy val typeStruct: Type.Struct =
@@ -101,7 +100,8 @@ object ClassHierarchy {
     lazy val typeValue: Val.Struct = Val
       .Struct(Global.None, Seq(Val.I32(id), Val.String(name.id), vtableValue))
 
-    lazy val typeConst: Val = Val.Global(name tag "class" tag "type", Type.Ptr)
+    lazy val typeConst: Val =
+      Val.Global(name tag "type", Type.Ptr)
 
     lazy val vtable: Seq[Val] = {
       val base = parent.fold(Seq.empty[Val])(_.vtable)
@@ -244,14 +244,12 @@ object ClassHierarchy {
                         isModule = false))
 
       case defn: Defn.Module =>
-        val name = defn.name tag "module"
         val cls = new Class(defn.attrs,
-                            name,
+                            defn.name,
                             defn.parent,
                             defn.traits,
                             isModule = true)
         enter(defn.name, cls)
-        enter(name, cls)
 
       case defn: Defn.Var =>
         enter(defn.name, new Field(defn.attrs, defn.name, defn.ty))

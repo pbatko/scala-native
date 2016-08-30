@@ -212,8 +212,11 @@ trait Pass extends (Seq[Defn] => Seq[Defn]) {
   final def apply(ty: Type): Type                 = txType(ty)
 }
 
-trait PassCompanion {
+trait PassCompanion extends Depends {
   def apply(ctx: Ctx): Pass
+}
+
+trait Depends {
   def depends: Seq[Global] = Seq()
   def injects: Seq[Defn]   = Seq()
 }

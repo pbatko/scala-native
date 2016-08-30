@@ -3,13 +3,25 @@ package compiler
 package codegen
 
 import java.{lang => jl}
+import scala.collection.mutable
 import util.{unsupported, unreachable, sh, Show}
 import util.Show.{Sequence => s, Indent => i, Unindent => ui, Repeat => r, Newline => nl}
 import nir._
-import compiler.pass.MainInjection.unit
 import compiler.analysis.ClassHierarchyExtractors._
 
 trait LLValGen { self: LLCodeGen =>
+  import LLValGen._
+
+  private val consts  = mutable.Map.empty[Val, Res]
+  private var constid = 0
+
+  private lazy val stringFieldNames = {
+    val node  = ClassRef.unapply(StringName).get
+    val names = node.allfields.sortBy(_.index).map(_.name)
+    assert(names.length == 4, "java.lang.String is expected to have 4 fields.")
+    names
+  }
+
   private def llvmFloatHex(value: Float): String =
     "0x" + jl.Long.toHexString(jl.Double.doubleToRawLongBits(value.toDouble))
 
@@ -26,7 +38,7 @@ trait LLValGen { self: LLCodeGen =>
   }.toMap
 
   def genJustVal(v: Val): Res = v match {
-    case Val.Unit                            => genJustVal(unit)
+    case Val.Unit                            => genJustVal(LLDefnGen.unit)
     case Val.True                            => "true"
     case Val.False                           => "false"
     case Val.Zero(ty)                        => "zeroinitializer"
@@ -40,11 +52,52 @@ trait LLValGen { self: LLCodeGen =>
     case Val.Struct(_, vs)                   => sh"{ ${r(vs, sep = ", ")} }"
     case Val.Array(_, vs)                    => sh"[ ${r(vs, sep = ", ")} ]"
     case Val.Chars(v)                        => s("c\"", v, "\\00", "\"")
+    case Val.Const(v)                        => genConst(v)
+    case Val.String(v)                       => genString(v)
     case Val.Local(n, _) if copy.contains(n) => genJustVal(copy(n))
     case Val.Local(n, ty)                    => sh"%$n"
+    case Val.Global(ScopeRef(node), _)       => typeConst(node)
     case Val.Global(n, ty) =>
       sh"bitcast (${globals(n)}* ${genJustGlobal(n)} to i8*)"
     case _ => unsupported(v)
+  }
+
+  def genConst(v: Val): Res = {
+    if (consts.contains(v)) {
+      consts(v)
+    } else {
+      val id = constid
+      constid += 1
+      ll.global(sh"@__const.$id = constant $v")
+      val res = sh"bitcast (${v.ty}* @__const.$id to i8*)"
+      consts(v) = res
+      res
+    }
+  }
+
+  def genString(v: String): Res = {
+    val StringCls    = ClassRef.unapply(StringName).get
+    val CharArrayCls = ClassRef.unapply(CharArrayName).get
+
+    val chars       = v.toCharArray
+    val charsLength = Val.I32(chars.length)
+    val charsConst = Val.Const(
+        Val.Struct(
+            Global.None,
+            Seq(CharArrayCls.typeConst,
+                charsLength,
+                Val.I32(0), // padding to get next field aligned properly
+                Val.Array(Type.I16, chars.map(c => Val.I16(c.toShort))))))
+
+    val fieldValues = stringFieldNames.map {
+      case StringValueName          => charsConst
+      case StringOffsetName         => Val.I32(0)
+      case StringCountName          => charsLength
+      case StringCachedHashCodeName => Val.I32(v.hashCode)
+      case _                        => util.unreachable
+    }
+
+    genConst(Val.Struct(Global.None, StringCls.typeConst +: fieldValues))
   }
 
   def genJustGlobal(n: Global) = n match {
@@ -69,4 +122,21 @@ trait LLValGen { self: LLCodeGen =>
   implicit val genLocal: Show[Local] = Show {
     case Local(scope, id) => sh"$scope.$id"
   }
+}
+
+object LLValGen extends Depends {
+  val StringName               = Rt.String.name
+  val StringValueName          = StringName member "value" tag "field"
+  val StringOffsetName         = StringName member "offset" tag "field"
+  val StringCountName          = StringName member "count" tag "field"
+  val StringCachedHashCodeName = StringName member "cachedHashCode" tag "field"
+
+  val CharArrayName = Global.Top("scala.scalanative.runtime.CharArray")
+
+  override val depends = Seq(StringName,
+                             StringValueName,
+                             StringOffsetName,
+                             StringCountName,
+                             StringCachedHashCodeName,
+                             CharArrayName)
 }

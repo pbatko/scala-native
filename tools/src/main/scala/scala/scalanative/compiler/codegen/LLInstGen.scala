@@ -15,12 +15,6 @@ trait LLInstGen { self: LLCodeGen =>
   import self.{instanceTy => ity, instance => ival, dispatchTy => dty, dispatch => dval}
 
   private var returnsVoid = false
-
-  private lazy val ty   = genType(Rt.Type)
-  private lazy val unit = genJustVal(Val.Unit)
-
-  protected lazy val copy = mutable.Map.empty[Local, Val]
-
   private def terminate(): Nothing =
     throw Terminate
   private def terminating(f: => Unit): Unit =
@@ -28,6 +22,20 @@ trait LLInstGen { self: LLCodeGen =>
     catch {
       case Terminate => ()
     }
+
+  protected lazy val rtty = genType(Rt.Type)
+  protected lazy val unit = genJustVal(Val.Unit)
+  protected lazy val copy = mutable.Map.empty[Local, Val]
+
+  protected def typeConst(node: Node) = node match {
+    case cls: Class =>
+      val name = node.name tag "type"
+      val ty   = cls.typeStruct: Type
+      sh"bitcast ($ty* $name to i8*)"
+    case _ =>
+      val name = node.name tag "type"
+      sh"bitcast ($rtty* $name to i8*)"
+  }
 
   def genBody(blocks: Seq[Block], returnsVoid: Boolean): Res = {
     ll.startBody()
@@ -144,30 +152,30 @@ trait LLInstGen { self: LLCodeGen =>
       case Op.Load(ty, ptr) =>
         val pointee = fresh()
 
-        ll.inst(pointee, sh"bitcast $ptr to $ty*")
-        ll.inst(name, sh"load $ty, $ty* %$pointee")
+        ll.inst(pointee, sh"bitcast $ptr to $rtty*")
+        ll.inst(name, sh"load $rtty, $rtty* %$pointee")
 
       case Op.Store(ty, ptr, value) =>
         val pointee = fresh()
 
-        ll.inst(pointee, sh"bitcast $ptr to $ty*")
-        ll.inst(sh"store $value, $ty* %$pointee")
+        ll.inst(pointee, sh"bitcast $ptr to $rtty*")
+        ll.inst(sh"store $value, $rtty* %$pointee")
 
       case Op.Elem(ty, ptr, indexes) =>
         val pointee, derived = fresh()
 
-        ll.inst(pointee, sh"bitcast $ptr to $ty*")
+        ll.inst(pointee, sh"bitcast $ptr to $rtty*")
         ll.inst(
             derived,
-            sh"getelementptr $ty, $ty* %$pointee, ${r(indexes, sep = ", ")}")
+            sh"getelementptr $rtty, $rtty* %$pointee, ${r(indexes, sep = ", ")}")
         ll.inst(name, sh"bitcast ${ty.elemty(indexes.tail)}* %$derived to i8*")
 
       case Op.Stackalloc(ty, n) =>
         val pointee = fresh()
         val elems   = if (n == Val.None) sh"" else sh", $n"
 
-        ll.inst(pointee, sh"alloca $ty$elems")
-        ll.inst(name, sh"bitcast $ty* %$pointee to i8*")
+        ll.inst(pointee, sh"alloca $rtty$elems")
+        ll.inst(name, sh"bitcast $rtty* %$pointee to i8*")
 
       case Op.Extract(aggr, indexes) =>
         ll.inst(name, sh"extractvalue $aggr, ${r(indexes, sep = ", ")}")
@@ -208,14 +216,14 @@ trait LLInstGen { self: LLCodeGen =>
         ll.inst(name, sh"$cmp $l, ${genJustVal(r)}")
 
       case Op.Conv(opcode, ty, v) =>
-        ll.inst(name, sh"$opcode $v to $ty")
+        ll.inst(name, sh"$opcode $v to $rtty")
 
       case Op.Select(cond, v1, v2) =>
         ll.inst(name, sh"select $cond, $v1, $v2")
 
       case Op.Classalloc(ClassRef(cls)) =>
         val size  = fresh()
-        val clsty = cls.typeConst
+        val clsty = typeConst(cls)
 
         genInst(size, Op.Sizeof(cls.classStruct))
         ll.invoke(name, sh"i8* @scalanative_alloc($clsty, i64 %$size)")
@@ -226,15 +234,15 @@ trait LLInstGen { self: LLCodeGen =>
         val ty    = cls.classStruct: Type
         val index = sh"i32 ${fld.index + 1}"
 
-        ll.inst(typtr, sh"bitcast $obj to $ty*")
-        ll.inst(fieldptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, $index")
+        ll.inst(typtr, sh"bitcast $obj to $rtty*")
+        ll.inst(fieldptr, sh"getelementptr $rtty, $rtty* %$typtr, i32 0, $index")
         ll.inst(name, sh"bitcast ${fld.ty}* %$fieldptr to i8*")
 
       case Op.Sizeof(ty) =>
         val elem = fresh()
 
-        ll.inst(elem, sh"getelementptr $ty, $ty* null, i32 1")
-        ll.inst(name, sh"ptrtoint $ty* %$elem to i64")
+        ll.inst(elem, sh"getelementptr $rtty, $rtty* null, i32 1")
+        ll.inst(name, sh"ptrtoint $rtty* %$elem to i64")
 
       case Op.Is(ty, value) =>
         genIs(name, ty, genVal(value))
@@ -244,6 +252,10 @@ trait LLInstGen { self: LLCodeGen =>
 
       case Op.Method(sig, obj, meth) =>
         genMethod(name, sig, obj, meth)
+
+      case Op.Module(module) =>
+        val load = genJustGlobal(module tag "load")
+        ll.invoke(name, sh"i8* () $load()")
 
       case Op.Copy(value) =>
         copy(name) = value
@@ -262,10 +274,10 @@ trait LLInstGen { self: LLCodeGen =>
         genJustGlobal(n)
       case _ =>
         val cast = fresh()
-        ll.inst(cast, sh"bitcast $ptr to $ty*")
+        ll.inst(cast, sh"bitcast $ptr to $rtty*")
         sh"%$cast"
     }
-    val sig = sh"$ty $pointee(${r(args, sep = ", ")})"
+    val sig = sh"$rtty $pointee(${r(args, sep = ", ")})"
 
     if (resty.isUnit) {
       ll.invoke(sig)
@@ -282,19 +294,19 @@ trait LLInstGen { self: LLCodeGen =>
     case ClassRef(cls) =>
       val typtrptr, typtr = fresh()
 
-      ll.inst(typtrptr, sh"bitcast $obj to $ty**")
-      ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
+      ll.inst(typtrptr, sh"bitcast $obj to $rtty**")
+      ll.inst(typtr, sh"load $rtty*, $rtty** %$typtrptr")
 
       if (cls.range.length == 1) {
         val typtr1 = fresh()
 
-        ll.inst(typtr1, sh"bitcast $ty* %$typtr to i8*")
-        ll.inst(name, sh"icmp eq i8* %$typtr1, ${genJustVal(cls.typeConst)}")
+        ll.inst(typtr1, sh"bitcast $rtty* %$typtr to i8*")
+        ll.inst(name, sh"icmp eq i8* %$typtr1, ${typeConst(cls)}")
 
       } else {
         val idptr, id, ge, le = fresh()
 
-        ll.inst(idptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 0")
+        ll.inst(idptr, sh"getelementptr $rtty, $rtty* %$typtr, i32 0, i32 0")
         ll.inst(id, sh"load i32, i32* %$idptr")
         ll.inst(ge, sh"icmp sle i32 ${cls.range.start}, %$id")
         ll.inst(le, sh"icmp sle i32 %$id, ${cls.range.end}")
@@ -304,9 +316,9 @@ trait LLInstGen { self: LLCodeGen =>
     case TraitRef(trt) =>
       val typtrptr, typtr, idptr, id, boolptr = fresh()
 
-      ll.inst(typtrptr, sh"bitcast $obj to $ty**")
-      ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
-      ll.inst(idptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 0")
+      ll.inst(typtrptr, sh"bitcast $obj to $rtty**")
+      ll.inst(typtr, sh"load $rtty*, $rtty** %$typtrptr")
+      ll.inst(idptr, sh"getelementptr $rtty, $rtty* %$typtr, i32 0, i32 0")
       ll.inst(id, sh"load i32, i32* %$idptr")
       ll.inst(boolptr,
               sh"getelementptr $ity, $ival, i32 0, i32 %$id, i32 ${trt.id}")
@@ -356,10 +368,10 @@ trait LLInstGen { self: LLCodeGen =>
         val ty    = cls.typeStruct: Type
         val index = sh"i32 ${meth.vindex}"
 
-        ll.inst(typtrptr, sh"bitcast $obj to $ty**")
-        ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
+        ll.inst(typtrptr, sh"bitcast $obj to $rtty**")
+        ll.inst(typtr, sh"load $rtty*, $rtty** %$typtrptr")
         ll.inst(methptrptr,
-                sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 2, $index")
+                sh"getelementptr $rtty, $rtty* %$typtr, i32 0, i32 2, $index")
         ll.inst(name, sh"load i8*, i8** %$methptrptr")
 
       case MethodRef(trt: Trait, meth) =>
@@ -367,9 +379,9 @@ trait LLInstGen { self: LLCodeGen =>
 
         val mid = sh"i32 ${meth.id}"
 
-        ll.inst(typtrptr, sh"bitcast $obj to $ty**")
-        ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
-        ll.inst(idptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 0")
+        ll.inst(typtrptr, sh"bitcast $obj to $rtty**")
+        ll.inst(typtr, sh"load $rtty*, $rtty** %$typtrptr")
+        ll.inst(idptr, sh"getelementptr $rtty, $rtty* %$typtr, i32 0, i32 0")
         ll.inst(id, sh"load i32, i32* %$idptr")
         ll.inst(methptrptr,
                 sh"getelementptr $dty, $dval, i32 0, i32 %$id, $mid")

@@ -14,15 +14,15 @@ import ControlFlow.{Graph => CFG}
 import nir.Shows.brace
 import nir._
 
-class LLCodeGen(val assembly: Seq[Defn])(implicit val top: Top)
+class LLCodeGen(val assembly: Seq[Defn], val entry: Global)(implicit val top: Top)
     extends LLDefnGen
     with LLInstGen
     with LLTypeGen
     with LLValGen {
   type Res = Show.Result
 
-  val fresh = new Fresh("gen")
-  val ll    = new LLBuilder(fresh)
+  implicit val fresh = new Fresh("gen")
+  val ll             = new LLBuilder(fresh)
 
   def gen(buffer: java.nio.ByteBuffer) =
     buffer.put(genAssembly().toString.getBytes)

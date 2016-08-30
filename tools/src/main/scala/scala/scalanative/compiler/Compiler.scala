@@ -25,17 +25,16 @@ final class Compiler(opts: Opts) {
   private lazy val passCompanions: Seq[PassCompanion] = Seq(
       pass.LocalBoxingElimination,
       pass.DeadCodeElimination,
-      pass.MainInjection,
-      pass.ModuleLowering,
-      pass.RuntimeTypeInfoInjection,
-      pass.StringLowering,
-      pass.ConstLowering,
       pass.StackallocHoisting)
+
+  private lazy val depends = passCompanions ++ Seq(
+      codegen.LLValGen,
+      codegen.LLDefnGen)
 
   private lazy val (links, assembly): (Seq[Attr.Link], Seq[Defn]) =
     measure("linking") {
-      val deps           = passCompanions.flatMap(_.depends).distinct
-      val injects        = passCompanions.flatMap(_.injects).distinct
+      val deps           = depends.flatMap(_.depends).distinct
+      val injects        = depends.flatMap(_.injects).distinct
       val linker         = new Linker(opts.dotpath, opts.classpath)
       val (links, defns) = linker.linkClosed(entry +: deps)
       val assembly       = defns ++ injects
@@ -51,9 +50,9 @@ final class Compiler(opts: Opts) {
 
   private lazy val passes = passCompanions.map(_.apply(ctx))
 
-  private def codegen(assembly: Seq[Defn]): Unit = measure("codegen") {
+  private def gencode(assembly: Seq[Defn]): Unit = measure("codegen") {
     def serialize(defns: Seq[Defn], bb: ByteBuffer): Unit = {
-      val gen = new LLCodeGen(assembly)(ctx.top)
+      val gen = new LLCodeGen(assembly, ctx.entry)(ctx.top)
       gen.gen(bb)
     }
     serializeFile(serialize _, assembly, opts.outpath)
@@ -81,7 +80,12 @@ final class Compiler(opts: Opts) {
           loop(nassembly, rest)
       }
 
-    codegen(measure("transformations")(loop(assembly, passes.zipWithIndex)))
+    val assembly = this.assembly
+    val transformed = measure("transformations") {
+      loop(assembly, passes.zipWithIndex)
+    }
+
+    gencode(transformed)
 
     links
   }
