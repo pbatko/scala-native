@@ -127,7 +127,7 @@ trait LLDefnGen { self: LLCodeGen =>
     val body: Res =
       if (isDecl) s()
       else {
-        s(" ", brace(r(genBlocks(blocks))))
+        s(" ", brace(genBlocks(blocks)))
       }
 
     buf += ((tag,

@@ -35,7 +35,7 @@ final class LLBuilder(fresh: Fresh) {
     handler = None
   }
 
-  def end(): Seq[Res] = {
+  def end(): Res = {
     val buf = Buf.empty[Res]
 
     blocks.foreach {
@@ -60,7 +60,7 @@ final class LLBuilder(fresh: Fresh) {
         }
     }
 
-    buf
+    r(buf).toString
   }
 
   def block(name: Local,

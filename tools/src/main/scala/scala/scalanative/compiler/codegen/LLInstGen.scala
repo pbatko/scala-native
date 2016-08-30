@@ -28,7 +28,7 @@ trait LLInstGen { self: LLCodeGen =>
       case Terminate => ()
     }
 
-  def genBlocks(blocks: Seq[Block]): Seq[Res] = {
+  def genBlocks(blocks: Seq[Block]): Res = {
     ll.start()
 
     val cfg = ControlFlow(blocks)
