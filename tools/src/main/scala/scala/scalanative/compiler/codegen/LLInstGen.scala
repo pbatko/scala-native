@@ -98,6 +98,35 @@ trait LLInstGen { self: LLCodeGen =>
     }
   }
 
+  def genCf(in: Local, cf: Cf): Unit =
+    cf match {
+      case Cf.Unreachable =>
+        ll.unreachable()
+
+      case Cf.Ret(value) =>
+        ll.ret(value)
+
+      case Cf.Jump(Next.Label(name, values)) =>
+        ll.jump(name, values.map(genJustVal))
+
+      case Cf.If(cond, thenp, elsep) =>
+        ll.branch(cond, thenp.name, elsep.name)
+
+      case Cf.Switch(scrut, default, cases) =>
+        val pairs = cases.map {
+          case Next.Case(v, n) => (s(v), n)
+          case _               => unreachable
+        }
+        ll.switch(scrut, default.name, pairs)
+
+      case Cf.Throw(value) =>
+        ll.invoke(sh"void @scalanative_throw($value)")
+        ll.unreachable()
+
+      case Cf.Try(default, cases) =>
+        ll.jump(default.name, eh = Some(in tag "landingpad"))
+    }
+
   def genInst(name: Local, op: Op): Unit = {
     if (op.resty.isUnit) {
       copy(name) = Val.Unit
@@ -196,35 +225,6 @@ trait LLInstGen { self: LLCodeGen =>
         ll.inst(fieldptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, $index")
         ll.inst(name, sh"bitcast ${fld.ty}* %$fieldptr to i8*")
 
-      case Op.Method(sig, obj, MethodRef(cls: Class, meth))
-          if meth.isVirtual =>
-        val typtrptr, typtr, methptrptr = fresh()
-
-        val ty    = cls.typeStruct: Type
-        val index = sh"i32 ${meth.vindex}"
-
-        ll.inst(typtrptr, sh"bitcast $obj to $ty**")
-        ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
-        ll.inst(methptrptr,
-                sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 2, $index")
-        ll.inst(name, sh"load i8*, i8** %$methptrptr")
-
-      case Op.Method(sig, obj, MethodRef(_: Class, meth)) if meth.isStatic =>
-        copy(name) = Val.Global(meth.name, Type.Ptr)
-
-      case Op.Method(sig, obj, MethodRef(trt: Trait, meth)) =>
-        val typtrptr, typtr, idptr, id, methptrptr = fresh()
-
-        val mid = sh"i32 ${meth.id}"
-
-        ll.inst(typtrptr, sh"bitcast $obj to $ty**")
-        ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
-        ll.inst(idptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 0")
-        ll.inst(id, sh"load i32, i32* %$idptr")
-        ll.inst(methptrptr,
-                sh"getelementptr $dty, $dval, i32 0, i32 %$id, $mid")
-        ll.inst(name, sh"load i8*, i8** %$methptrptr")
-
       case Op.Sizeof(ty) =>
         val elem = fresh()
 
@@ -234,35 +234,11 @@ trait LLInstGen { self: LLCodeGen =>
       case Op.Is(ty, value) =>
         genIs(name, ty, genVal(value))
 
-      case Op.As(ty1, Of(v, ty2)) if ty1 == ty2 =>
-        copy(name) = v
+      case Op.As(ty, value) =>
+        genAs(name, ty, value)
 
-      case Op.As(_: Type.RefKind, Of(v, _: Type.RefKind)) =>
-        copy(name) = v
-
-      case Op.As(to @ Type.I(w1), Of(v, Type.I(w2))) if w1 > w2 =>
-        ll.inst(name, sh"sext $v to ${to: Type}")
-
-      case Op.As(to @ Type.I(w1), Of(v, Type.I(w2))) if w1 < w2 =>
-        ll.inst(name, sh"trunc $v to ${to: Type}")
-
-      case Op.As(to @ Type.I(_), Of(v, Type.F(_))) =>
-        ll.inst(name, sh"fptosi $v to ${to: Type}")
-
-      case Op.As(to @ Type.F(_), Of(v, Type.I(_))) =>
-        ll.inst(name, sh"sitofp $v to ${to: Type}")
-
-      case Op.As(to @ Type.F(w1), Of(v, Type.F(w2))) if w1 > w2 =>
-        ll.inst(name, sh"fpext $v to ${to: Type}")
-
-      case Op.As(to @ Type.F(w1), Of(v, Type.F(w2))) if w1 < w2 =>
-        ll.inst(name, sh"fptrunc $v to ${to: Type}")
-
-      case Op.As(Type.Ptr, Of(v, _: Type.RefKind)) =>
-        ll.inst(name, sh"bitcast $v to i8*")
-
-      case Op.As(to @ (_: Type.RefKind), Of(v, Type.Ptr)) =>
-        ll.inst(name, sh"bitcast $v to ${to: Type}")
+      case Op.Method(sig, obj, meth) =>
+        genMethod(name, sig, obj, meth)
 
       case Op.Copy(value) =>
         copy(name) = value
@@ -277,8 +253,8 @@ trait LLInstGen { self: LLCodeGen =>
     val pointee = ptr match {
       case Val.Local(n, _) if copy.contains(n) =>
         return genCall(name, ty, copy(n), args)
-      case Val.Global(pointee, _) =>
-        sh"@$pointee"
+      case Val.Global(n, _) =>
+        genJustGlobal(n)
       case _ =>
         val cast = fresh()
         ll.inst(cast, sh"bitcast $ptr to $ty*")
@@ -330,34 +306,67 @@ trait LLInstGen { self: LLCodeGen =>
       ll.inst(name, sh"load i1, i1* %$boolptr")
   }
 
-  def genCf(in: Local, cf: Cf): Unit =
-    cf match {
-      case Cf.Unreachable =>
-        ll.unreachable()
+  def genAs(name: Local, to: Type, v: Val): Unit = (to, v.ty) match {
+    case (ty1, ty2) if ty1 == ty2 =>
+      copy(name) = v
 
-      case Cf.Ret(value) =>
-        ll.ret(value)
+    case (_: Type.RefKind, _: Type.RefKind) =>
+      copy(name) = v
 
-      case Cf.Jump(Next.Label(name, values)) =>
-        ll.jump(name, values.map(genJustVal))
+    case (to @ Type.I(w1), Type.I(w2)) if w1 > w2 =>
+      ll.inst(name, sh"sext $v to ${to: Type}")
 
-      case Cf.If(cond, thenp, elsep) =>
-        ll.branch(cond, thenp.name, elsep.name)
+    case (to @ Type.I(w1), Type.I(w2)) if w1 < w2 =>
+      ll.inst(name, sh"trunc $v to ${to: Type}")
 
-      case Cf.Switch(scrut, default, cases) =>
-        val pairs = cases.map {
-          case Next.Case(v, n) => (s(v), n)
-          case _               => unreachable
-        }
-        ll.switch(scrut, default.name, pairs)
+    case (to @ Type.I(_), Type.F(_)) =>
+      ll.inst(name, sh"fptosi $v to ${to: Type}")
 
-      case Cf.Throw(value) =>
-        ll.invoke(sh"void @scalanative_throw($value)")
-        ll.unreachable()
+    case (to @ Type.F(_), Type.I(_)) =>
+      ll.inst(name, sh"sitofp $v to ${to: Type}")
 
-      case Cf.Try(default, cases) =>
-        ll.jump(default.name, eh = Some(in tag "landingpad"))
-    }
+    case (to @ Type.F(w1), Type.F(w2)) if w1 > w2 =>
+      ll.inst(name, sh"fpext $v to ${to: Type}")
+
+    case (to @ Type.F(w1), Type.F(w2)) if w1 < w2 =>
+      ll.inst(name, sh"fptrunc $v to ${to: Type}")
+
+    case (Type.Ptr, _: Type.RefKind) =>
+      ll.inst(name, sh"bitcast $v to i8*")
+
+    case (to @ (_: Type.RefKind), Type.Ptr) =>
+      ll.inst(name, sh"bitcast $v to ${to: Type}")
+  }
+
+  def genMethod(name: Local, sig: Type, obj: Val, meth: Global): Unit = meth match {
+    case MethodRef(_: Class, meth) if meth.isStatic =>
+      copy(name) = Val.Global(meth.name, Type.Ptr)
+
+    case MethodRef(cls: Class, meth) if meth.isVirtual =>
+      val typtrptr, typtr, methptrptr = fresh()
+
+      val ty    = cls.typeStruct: Type
+      val index = sh"i32 ${meth.vindex}"
+
+      ll.inst(typtrptr, sh"bitcast $obj to $ty**")
+      ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
+      ll.inst(methptrptr,
+              sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 2, $index")
+      ll.inst(name, sh"load i8*, i8** %$methptrptr")
+
+    case MethodRef(trt: Trait, meth) =>
+      val typtrptr, typtr, idptr, id, methptrptr = fresh()
+
+      val mid = sh"i32 ${meth.id}"
+
+      ll.inst(typtrptr, sh"bitcast $obj to $ty**")
+      ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
+      ll.inst(idptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 0")
+      ll.inst(id, sh"load i32, i32* %$idptr")
+      ll.inst(methptrptr,
+              sh"getelementptr $dty, $dval, i32 0, i32 %$id, $mid")
+      ll.inst(name, sh"load i8*, i8** %$methptrptr")
+  }
 
   implicit val genNext: Show[Next] = Show {
     case Next.Case(v, n) => sh"$v, label %$n"
@@ -377,10 +386,6 @@ object LLInstGen {
 
   val typeid =
     sh"call i32 @llvm.eh.typeid.for(i8* bitcast ({ i8*, i8*, i8* }* @_ZTIN11scalanative16ExceptionWrapperE to i8*))"
-
-  object Of {
-    def unapply(v: Val): Some[(Val, Type)] = Some((v, v.ty))
-  }
 }
 
 private[codegen] final case object Terminate extends Exception

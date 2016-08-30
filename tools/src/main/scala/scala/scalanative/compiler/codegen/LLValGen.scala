@@ -42,10 +42,14 @@ trait LLValGen { self: LLCodeGen =>
     case Val.Chars(v)                        => s("c\"", v, "\\00", "\"")
     case Val.Local(n, _) if copy.contains(n) => genJustVal(copy(n))
     case Val.Local(n, ty)                    => sh"%$n"
-    case Val.Global(n @ Ref(node), ty) if node.attrs.isExtern =>
-      genJustVal(Val.Global(stripExtern(n), ty))
-    case Val.Global(n, ty) => sh"bitcast (${globals(n)}* @$n to i8*)"
+    case Val.Global(n, ty) =>
+      sh"bitcast (${globals(n)}* ${genJustGlobal(n)} to i8*)"
     case _                 => unsupported(v)
+  }
+
+  def genJustGlobal(n: Global) = n match {
+    case Ref(node) if node.attrs.isExtern => sh"@${stripExtern(n)}"
+    case _                                => sh"@$n"
   }
 
   implicit val genVal: Show[Val] = Show { v =>
