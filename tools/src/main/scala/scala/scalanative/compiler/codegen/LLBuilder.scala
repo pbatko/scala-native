@@ -8,10 +8,19 @@ import util.Show.{Sequence => s, Indent => i, Unindent => ui, Repeat => r, Newli
 import nir._
 
 final class LLBuilder(fresh: Fresh) {
+  // current definition state
+  private val declares = Buf.empty[Res]
+  private val defines  = Buf.empty[Res]
+  private val consts   = Buf.empty[Res]
+  private val globals  = Buf.empty[Res]
+  private val structs  = Buf.empty[Res]
+
+  // current body state
   private val edges    = Map.empty[Local, Buf[(Local, Seq[Res])]]
   private val blocks   = Buf.empty[LLBlock]
   private val handlers = Map.empty[Local, Option[Local]]
 
+  // current basic block state
   private var name: Local               = _
   private var params: Seq[(Local, Res)] = _
   private var insts: Buf[Res]           = _
@@ -28,14 +37,47 @@ final class LLBuilder(fresh: Fresh) {
   private def exchandler(to: Local, handler: Local): Unit =
     handlers(to) = Some(handler)
 
-  def start(): Unit = {
+  def start() = {
+    declares.clear()
+    defines.clear()
+    consts.clear()
+    globals.clear()
+    structs.clear()
+  }
+
+  def end(): Res = {
+    val res = Buf.empty[Res]
+    res ++= structs
+    res ++= consts
+    res ++= globals
+    res ++= declares
+    res ++= defines
+    r(res, sep = nl(""))
+  }
+
+  def declare(value: Res): Unit =
+    declares += value
+
+  def define(value: Res): Unit =
+    defines += value
+
+  def const(value: Res): Unit =
+    consts += value
+
+  def global(value: Res): Unit =
+    globals += value
+
+  def struct(value: Res): Unit =
+    structs += value
+
+  def startBody(): Unit = {
     edges.clear()
     blocks.clear()
     handlers.clear()
     handler = None
   }
 
-  def end(): Res = {
+  def endBody(): Res = {
     val buf = Buf.empty[Res]
 
     blocks.foreach {

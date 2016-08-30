@@ -44,7 +44,7 @@ trait LLValGen { self: LLCodeGen =>
     case Val.Local(n, ty)                    => sh"%$n"
     case Val.Global(n, ty) =>
       sh"bitcast (${globals(n)}* ${genJustGlobal(n)} to i8*)"
-    case _                 => unsupported(v)
+    case _ => unsupported(v)
   }
 
   def genJustGlobal(n: Global) = n match {

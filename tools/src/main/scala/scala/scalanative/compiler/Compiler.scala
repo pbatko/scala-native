@@ -73,9 +73,10 @@ final class Compiler(opts: Opts) {
           assembly
 
         case (pass, id) +: rest =>
-          val nassembly = pass(assembly)
-          val n         = id + 1
-          val padded    = if (n < 10) "0" + n else "" + n
+          val nassembly =
+            measure(s"pass: ${passCompanions(id)}")(pass(assembly))
+          val n      = id + 1
+          val padded = if (n < 10) "0" + n else "" + n
 
           loop(nassembly, rest)
       }

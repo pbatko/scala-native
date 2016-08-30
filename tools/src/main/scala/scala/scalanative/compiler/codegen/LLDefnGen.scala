@@ -17,17 +17,6 @@ trait LLDefnGen { self: LLCodeGen =>
   private lazy val gxxpersonality =
     sh"personality i8* bitcast (i32 (...)* @__gxx_personality_v0 to i8*)"
 
-  private lazy val prelude = Seq(
-      (DECLARE, sh"declare void @scalanative_throw(i8*)"),
-      (DECLARE, sh"declare i8* @scalanative_alloc(i8*, i64)"),
-      (DECLARE, sh"declare i32 @llvm.eh.typeid.for(i8*)"),
-      (DECLARE, sh"declare i32 @__gxx_personality_v0(...)"),
-      (DECLARE, sh"declare i8* @__cxa_begin_catch(i8*)"),
-      (DECLARE, sh"declare void @__cxa_end_catch()"),
-      (CONST,
-       sh"@_ZTIN11scalanative16ExceptionWrapperE = external constant { i8*, i8*, i8* }")
-  )
-
   /** Strips "extern." suffix from the given global. */
   protected def stripExtern(n: Global): Global = {
     val id = n.id
@@ -52,8 +41,6 @@ trait LLDefnGen { self: LLCodeGen =>
     (value.ty, defn)
   }
 
-  lazy val dispatch = sh"$dispatchTy* @${dispatchName: Global}"
-
   lazy val (instanceTy, instanceDefn) = {
     val columns = classes.sortBy(_.id).map { cls =>
       val row = new Array[Boolean](traits.length)
@@ -68,38 +55,49 @@ trait LLDefnGen { self: LLCodeGen =>
     (value.ty, defn)
   }
 
+  lazy val dispatch = sh"$dispatchTy* @${dispatchName: Global}"
   lazy val instance = sh"$instanceTy* @${instanceName: Global}"
 
-  def genAssembly(): Res = withTaggedResBuf { buf =>
-    buf ++= prelude
-    assembly.foreach(genDefn(buf, _))
-    genDefn(buf, instanceDefn)
-    genDefn(buf, dispatchDefn)
-
-    r(buf.sortBy(_._1).map(_._2), sep = nl(""))
+  def genAssembly(): Res = {
+    ll.start()
+    genPrelude()
+    assembly.foreach(genDefn(_))
+    genDefn(instanceDefn)
+    genDefn(dispatchDefn)
+    ll.end()
   }
 
-  def genDefn(buf: TaggedResBuf, defn: Defn): Unit = defn match {
+  def genPrelude() = {
+    ll.declare(sh"declare void @scalanative_throw(i8*)")
+    ll.declare(sh"declare i8* @scalanative_alloc(i8*, i64)")
+    ll.declare(sh"declare i32 @llvm.eh.typeid.for(i8*)")
+    ll.declare(sh"declare i32 @__gxx_personality_v0(...)")
+    ll.declare(sh"declare i8* @__cxa_begin_catch(i8*)")
+    ll.declare(sh"declare void @__cxa_end_catch()")
+    ll.const(
+        sh"@_ZTIN11scalanative16ExceptionWrapperE = external constant { i8*, i8*, i8* }")
+  }
+
+  def genDefn(defn: Defn): Unit = defn match {
     case Defn.Var(attrs, name, ty, rhs) =>
-      genGlobalDefn(buf, name, attrs.isExtern, isConst = false, ty, rhs)
+      genGlobalDefn(name, attrs.isExtern, isConst = false, ty, rhs)
     case Defn.Const(attrs, name, ty, rhs) =>
-      genGlobalDefn(buf, name, attrs.isExtern, isConst = true, ty, rhs)
+      genGlobalDefn(name, attrs.isExtern, isConst = true, ty, rhs)
     case Defn.Declare(attrs, name, sig) =>
-      genFunctionDefn(buf, attrs, name, sig, Seq())
+      genFunctionDefn(attrs, name, sig, Seq())
     case Defn.Define(attrs, name, sig, blocks) =>
-      genFunctionDefn(buf, attrs, name, sig, blocks)
+      genFunctionDefn(attrs, name, sig, blocks)
     case Defn.Struct(_, name, tys) =>
-      genStruct(buf, name, tys)
+      genStruct(name, tys)
     case Defn.Class(_, ClassRef(cls), _, _) =>
-      genClass(buf, cls)
+      genClass(cls)
     case Defn.Trait(_, TraitRef(trt), _) =>
-      genTrait(buf, trt)
+      genTrait(trt)
     case defn =>
       unsupported(defn)
   }
 
-  def genGlobalDefn(buf: TaggedResBuf,
-                    name: nir.Global,
+  def genGlobalDefn(name: nir.Global,
                     isExtern: Boolean,
                     isConst: Boolean,
                     ty: nir.Type,
@@ -107,26 +105,26 @@ trait LLDefnGen { self: LLCodeGen =>
     val stripped = if (isExtern) stripExtern(name) else name
     val external = if (isExtern) "external " else ""
     val keyword  = if (isConst) "constant" else "global"
-    val tag      = if (isConst) CONST else GLOBAL
     val init = rhs match {
       case Val.None => sh"$ty"
       case _        => sh"$rhs"
     }
+    val res = sh"@$stripped = $external$keyword $init"
 
-    buf += ((tag, sh"@$stripped = $external$keyword $init"))
+    if (isConst) ll.const(res) else ll.global(res)
   }
 
-  def genFunctionDefn(buf: TaggedResBuf,
-                      attrs: Attrs,
+  def genFunctionDefn(attrs: Attrs,
                       name: Global,
                       sig: Type,
                       blocks: Seq[Block]): Unit = {
     val Type.Function(argtys, retty) = sig
 
-    val stripped = if (attrs.isExtern) stripExtern(name) else name
-    val isDecl   = blocks.isEmpty
-    val keyword  = if (isDecl) "declare" else "define"
-    val tag      = if (isDecl) DECLARE else DEFINE
+    val returnsVoid = retty.isUnit || retty.isNothing
+    val stripped    = if (attrs.isExtern) stripExtern(name) else name
+    val isDecl      = blocks.isEmpty
+    val keyword     = if (isDecl) "declare" else "define"
+    val tag         = if (isDecl) DECLARE else DEFINE
     val params =
       if (isDecl) r(argtys, sep = ", ")
       else r(blocks.head.params: Seq[Val], sep = ", ")
@@ -136,20 +134,21 @@ trait LLDefnGen { self: LLCodeGen =>
     val body: Res =
       if (isDecl) s()
       else {
-        s(" ", brace(genBlocks(blocks)))
+        s(" ", brace(genBody(blocks, returnsVoid)))
       }
+    val ret = if (returnsVoid) sh"void" else retty: Res
+    val res = sh"$keyword $ret @$stripped($params)$postattrs$personality$body"
 
-    buf += ((tag,
-             sh"$keyword $retty @$stripped($params)$postattrs$personality$body"))
+    if (isDecl) ll.declare(res) else ll.define(res)
   }
 
-  def genStruct(buf: TaggedResBuf, name: Global, tys: Seq[Type]): Unit =
-    buf += ((STRUCT, sh"%$name = type {${r(tys, sep = ", ")}}"))
+  def genStruct(name: Global, tys: Seq[Type]): Unit =
+    ll.struct(sh"%$name = type {${r(tys, sep = ", ")}}")
 
-  def genClass(buf: TaggedResBuf, cls: Class): Unit =
-    genStruct(buf, cls.classStruct.name, cls.classStruct.tys)
+  def genClass(cls: Class): Unit =
+    genStruct(cls.classStruct.name, cls.classStruct.tys)
 
-  def genTrait(buf: TaggedResBuf, trt: Trait): Unit = ()
+  def genTrait(trt: Trait): Unit = ()
 }
 
 object LLDefnGen {

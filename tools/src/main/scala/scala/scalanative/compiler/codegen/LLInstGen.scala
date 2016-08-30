@@ -14,7 +14,8 @@ trait LLInstGen { self: LLCodeGen =>
   import LLInstGen._
   import self.{instanceTy => ity, instance => ival, dispatchTy => dty, dispatch => dval}
 
-  private lazy val ll   = new LLBuilder(fresh)
+  private var returnsVoid = false
+
   private lazy val ty   = genType(Rt.Type)
   private lazy val unit = genJustVal(Val.Unit)
 
@@ -28,9 +29,10 @@ trait LLInstGen { self: LLCodeGen =>
       case Terminate => ()
     }
 
-  def genBlocks(blocks: Seq[Block]): Res = {
-    ll.start()
+  def genBody(blocks: Seq[Block], returnsVoid: Boolean): Res = {
+    ll.startBody()
 
+    this.returnsVoid = returnsVoid
     val cfg = ControlFlow(blocks)
     cfg.map { node =>
       val block @ Block(name, params, insts, cf) = node.block
@@ -52,7 +54,7 @@ trait LLInstGen { self: LLCodeGen =>
     }
 
     copy.clear()
-    ll.end()
+    ll.endBody()
   }
 
   def genLandingPad(in: Local, cf: Cf.Try): Unit = {
@@ -102,6 +104,9 @@ trait LLInstGen { self: LLCodeGen =>
     cf match {
       case Cf.Unreachable =>
         ll.unreachable()
+
+      case Cf.Ret(_) if returnsVoid =>
+        ll.ret(sh"void")
 
       case Cf.Ret(value) =>
         ll.ret(value)
@@ -262,7 +267,9 @@ trait LLInstGen { self: LLCodeGen =>
     }
     val sig = sh"$ty $pointee(${r(args, sep = ", ")})"
 
-    if (resty.isNothing) {
+    if (resty.isUnit) {
+      ll.invoke(sig)
+    } else if (resty.isNothing) {
       ll.invoke(sig)
       ll.unreachable()
       terminate()
@@ -338,35 +345,36 @@ trait LLInstGen { self: LLCodeGen =>
       ll.inst(name, sh"bitcast $v to ${to: Type}")
   }
 
-  def genMethod(name: Local, sig: Type, obj: Val, meth: Global): Unit = meth match {
-    case MethodRef(_: Class, meth) if meth.isStatic =>
-      copy(name) = Val.Global(meth.name, Type.Ptr)
+  def genMethod(name: Local, sig: Type, obj: Val, meth: Global): Unit =
+    meth match {
+      case MethodRef(_: Class, meth) if meth.isStatic =>
+        copy(name) = Val.Global(meth.name, Type.Ptr)
 
-    case MethodRef(cls: Class, meth) if meth.isVirtual =>
-      val typtrptr, typtr, methptrptr = fresh()
+      case MethodRef(cls: Class, meth) if meth.isVirtual =>
+        val typtrptr, typtr, methptrptr = fresh()
 
-      val ty    = cls.typeStruct: Type
-      val index = sh"i32 ${meth.vindex}"
+        val ty    = cls.typeStruct: Type
+        val index = sh"i32 ${meth.vindex}"
 
-      ll.inst(typtrptr, sh"bitcast $obj to $ty**")
-      ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
-      ll.inst(methptrptr,
-              sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 2, $index")
-      ll.inst(name, sh"load i8*, i8** %$methptrptr")
+        ll.inst(typtrptr, sh"bitcast $obj to $ty**")
+        ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
+        ll.inst(methptrptr,
+                sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 2, $index")
+        ll.inst(name, sh"load i8*, i8** %$methptrptr")
 
-    case MethodRef(trt: Trait, meth) =>
-      val typtrptr, typtr, idptr, id, methptrptr = fresh()
+      case MethodRef(trt: Trait, meth) =>
+        val typtrptr, typtr, idptr, id, methptrptr = fresh()
 
-      val mid = sh"i32 ${meth.id}"
+        val mid = sh"i32 ${meth.id}"
 
-      ll.inst(typtrptr, sh"bitcast $obj to $ty**")
-      ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
-      ll.inst(idptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 0")
-      ll.inst(id, sh"load i32, i32* %$idptr")
-      ll.inst(methptrptr,
-              sh"getelementptr $dty, $dval, i32 0, i32 %$id, $mid")
-      ll.inst(name, sh"load i8*, i8** %$methptrptr")
-  }
+        ll.inst(typtrptr, sh"bitcast $obj to $ty**")
+        ll.inst(typtr, sh"load $ty*, $ty** %$typtrptr")
+        ll.inst(idptr, sh"getelementptr $ty, $ty* %$typtr, i32 0, i32 0")
+        ll.inst(id, sh"load i32, i32* %$idptr")
+        ll.inst(methptrptr,
+                sh"getelementptr $dty, $dval, i32 0, i32 %$id, $mid")
+        ll.inst(name, sh"load i8*, i8** %$methptrptr")
+    }
 
   implicit val genNext: Show[Next] = Show {
     case Next.Case(v, n) => sh"$v, label %$n"

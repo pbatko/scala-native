@@ -19,20 +19,10 @@ class LLCodeGen(val assembly: Seq[Defn])(implicit val top: Top)
     with LLInstGen
     with LLTypeGen
     with LLValGen {
-  type Res          = Show.Result
-  type TaggedRes    = (Int, Res)
-  type Buf[T]       = mutable.UnrolledBuffer[T]
-  type ResBuf       = Buf[Res]
-  type TaggedResBuf = Buf[TaggedRes]
-
-  def withBuf[T: ClassTag, R](f: Buf[T] => R): R = {
-    val buf = mutable.UnrolledBuffer.empty[T]
-    f(buf)
-  }
-  def withResBuf[R](f: ResBuf => R): R             = withBuf[Res, R](f)
-  def withTaggedResBuf[R](f: TaggedResBuf => R): R = withBuf[TaggedRes, R](f)
+  type Res = Show.Result
 
   val fresh = new Fresh("gen")
+  val ll    = new LLBuilder(fresh)
 
   def gen(buffer: java.nio.ByteBuffer) =
     buffer.put(genAssembly().toString.getBytes)
