@@ -54,10 +54,17 @@ object ClassHierarchyExtractors {
       }
   }
 
-  object FieldRef extends Extractor[(Scope, Field)] {
-    def unapply(name: Global)(implicit world: World): Option[(Scope, Field)] =
+  object VarRef extends Extractor[(Scope, Var)] {
+    def unapply(name: Global)(implicit world: World): Option[(Scope, Var)] =
       world.nodes.get(name).collect {
-        case node: Field => (node.in, node)
+        case node: Var => (node.in, node)
+      }
+  }
+
+  object ConstRef extends Extractor[(Scope, Const)] {
+    def unapply(name: Global)(implicit world: World): Option[(Scope, Const)] =
+      world.nodes.get(name).collect {
+        case node: Const => (node.in, node)
       }
   }
 }

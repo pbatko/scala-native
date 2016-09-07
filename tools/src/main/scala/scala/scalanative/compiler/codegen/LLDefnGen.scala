@@ -58,7 +58,7 @@ trait LLDefnGen { self: LLCodeGen =>
   lazy val dispatch = sh"$dispatchTy* @${dispatchName: Global}"
   lazy val instance = sh"$instanceTy* @${instanceName: Global}"
 
-  def genAssembly(): Res = {
+  def genWorld(): Res = {
     ll.start()
     genPrelude()
     assembly.foreach(genDefn(_))
@@ -105,8 +105,9 @@ trait LLDefnGen { self: LLCodeGen =>
   }
 
   def genDefn(defn: Defn): Unit = defn match {
-    case Defn.Var(attrs, name, ty, rhs) =>
-      genGlobalDefn(name, ty, rhs, isExtern = attrs.isExtern, isConst = false)
+    case Defn.Var(attrs, name @ Ref(node), ty, rhs) =>
+      if (node.inWorld)
+        genGlobalDefn(name, ty, rhs, isExtern = attrs.isExtern, isConst = false)
     case Defn.Const(attrs, name, ty, rhs) =>
       genGlobalDefn(name, ty, rhs, isExtern = attrs.isExtern, isConst = true)
     case Defn.Declare(attrs, name, sig) =>
@@ -136,7 +137,7 @@ trait LLDefnGen { self: LLCodeGen =>
                     isConst: Boolean): Unit = {
     val stripped = if (isExtern) stripExtern(name) else name
 
-    ll.global(name, ty, init, isConst, isExtern)
+    ll.global(name, ty, genJustVal(init), isConst, isExtern)
   }
 
   def genFunctionDefn(attrs: Attrs,
@@ -148,9 +149,10 @@ trait LLDefnGen { self: LLCodeGen =>
     val retsvoid = retty.isUnit || retty.isNothing
     val llretty  = if (retsvoid) sh"void" else retty: Res
     val llname   = if (attrs.isExtern) stripExtern(name) else name
-    val llattrs  = {
+    val llattrs = {
       val inline =
-        if (attrs.inline == Attr.MayInline) Seq() else Seq((attrs.inline: Attr): Res)
+        if (attrs.inline == Attr.MayInline) Seq()
+        else Seq((attrs.inline: Attr): Res)
       val personality = if (attrs.isExtern) Seq() else Seq(gxxpersonality: Res)
       inline ++ personality
     }
@@ -158,7 +160,11 @@ trait LLDefnGen { self: LLCodeGen =>
     if (blocks.isEmpty) {
       ll.declare(llretty, llname, argtys, llattrs)
     } else {
-      ll.define(llretty, llname, argtys, llattrs, genBody(blocks, retsvoid))
+      ll.define(llretty,
+                llname,
+                argtys,
+                llattrs,
+                genBody(tx(blocks), retsvoid))
     }
   }
 
@@ -173,25 +179,20 @@ trait LLDefnGen { self: LLCodeGen =>
   def genModule(cls: Class): Unit = {
     genClass(cls)
     genModuleValue(cls)
-    genModuleLoad(cls)
+    genModuleAccessor(cls)
   }
 
   def genModuleValue(cls: Class): Unit = {
-    val clsName = cls.name
-    val clsTy   = Type.Class(clsName): Type
-    val clsNull = Val.Zero(clsTy): Val
+    val name = cls.name tag "value"
+    val ty   = Type.Class(cls.name): Type
+    val init = genJustVal(Val.Zero(ty))
 
-    val valueName = clsName tag "value"
-    val valueDefn = Defn.Var(Attrs.None, valueName, clsTy, clsNull)
-    val value     = Val.Global(valueName, Type.Ptr)
-
-    ll.global(valueName, clsTy, clsNull, isConst = false, isExtern = false)
+    ll.global(name, ty, init, isConst = false, isExtern = false)
   }
 
-  def genModuleLoad(cls: Class): Unit = {
+  def genModuleAccessor(cls: Class): Unit = {
     val name = cls.name
-    val load = name tag "load"
-    val body = brace {
+    val body = {
       val entry, existing, initialize, self, cond, alloc = fresh()
 
       val value = genJustGlobal(name tag "value")
@@ -218,7 +219,7 @@ trait LLDefnGen { self: LLCodeGen =>
       ll.endBody()
     }
 
-    ll.define(i8_*, load, Seq(), Seq(), body)
+    ll.define(i8_*, name tag "access", Seq(), Seq(), body)
   }
 
   def genTrait(trt: Trait): Unit = ()
@@ -241,7 +242,7 @@ trait LLDefnGen { self: LLCodeGen =>
   }
 
   implicit def genAttrSeq: Show[Seq[Attr]] = nir.Shows.showAttrSeq
-  implicit def genAttr: Show[Attr] = nir.Shows.showAttr
+  implicit def genAttr: Show[Attr]         = nir.Shows.showAttr
 }
 
 object LLDefnGen extends Depends {
@@ -278,9 +279,7 @@ object LLDefnGen extends Depends {
   val unit      = Val.Global(unitName, Type.Ptr)
   val unitTy    = Type.Struct(unitName, Seq(Type.Ptr))
   val unitConst = Val.Global(unitName tag "type", Type.Ptr)
-  val unitValue = Val.Struct(unitTy.name, Seq(unitConst))
-  val unitDefn  = Defn.Const(Attrs.None, unitName, unitTy, unitValue)
+  val unitValue = Val.Struct(unitName tag "value", Seq(unitConst))
 
   override val depends = Seq(unitName, ObjectArray.name, Rt.name, init.name)
-  override val injects = Seq(unitDefn)
 }

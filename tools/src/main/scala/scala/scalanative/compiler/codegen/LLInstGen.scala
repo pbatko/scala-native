@@ -228,7 +228,7 @@ trait LLInstGen { self: LLCodeGen =>
         genInst(size, Op.Sizeof(cls.classStruct))
         ll.invoke(name, sh"i8* @scalanative_alloc($clsty, i64 %$size)")
 
-      case Op.Field(ty, obj, FieldRef(cls: Class, fld)) =>
+      case Op.Field(ty, obj, VarRef(cls: Class, fld)) =>
         val typtr, fieldptr = fresh()
 
         val ty    = cls.classStruct: Type

@@ -17,7 +17,7 @@ trait LLValGen { self: LLCodeGen =>
 
   private lazy val stringFieldNames = {
     val node  = ClassRef.unapply(StringName).get
-    val names = node.allfields.sortBy(_.index).map(_.name)
+    val names = node.allvars.sortBy(_.index).map(_.name)
     assert(names.length == 4, "java.lang.String is expected to have 4 fields.")
     names
   }
@@ -51,7 +51,7 @@ trait LLValGen { self: LLCodeGen =>
     case Val.Local(n, ty)                    => sh"%$n"
     case Val.Global(ScopeRef(node), _)       => typeConst(node)
     case Val.Global(n, ty) =>
-      sh"bitcast (${ll.global(n)} to i8*)"
+      sh"bitcast (i8* @$n to i8*)"
     case _ =>
       unsupported(v)
   }
@@ -62,7 +62,7 @@ trait LLValGen { self: LLCodeGen =>
     } else {
       val id = constid
       constid += 1
-      ll.global(Global.Top("__const.$id"), v.ty, v)
+      ll.global(Global.Top("__const." + id), v.ty, genJustVal(v))
       val res = sh"bitcast (${v.ty}* @__const.$id to i8*)"
       consts(v) = res
       res

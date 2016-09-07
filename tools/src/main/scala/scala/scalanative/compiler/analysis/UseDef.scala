@@ -16,17 +16,15 @@ object UseDef {
   private class CollectLocalValDeps extends Pass {
     val deps = mutable.UnrolledBuffer.empty[Local]
 
-    override def preVal = {
+    override def onVal(v: Val) = v match {
       case v @ Val.Local(n, _) =>
         deps += n
-        v
+      case _ =>
+        ()
     }
 
-    override def preNext = {
-      case next =>
-        deps += next.name
-        next
-    }
+    override def onNext(next: Next) =
+      deps += next.name
   }
 
   private def deps(inst: Inst): Seq[Local] = {

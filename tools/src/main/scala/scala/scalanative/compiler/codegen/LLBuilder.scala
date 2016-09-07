@@ -106,7 +106,7 @@ final class LLBuilder(fresh: Fresh) {
     tys(name) = ty
   }
 
-  def struct(n: Global, tys: Seq[Res]): Unit = {
+  def struct(name: Global, tys: Seq[Res]): Unit = {
     structs += sh"%$name = type {${r(tys, sep = ", ")}}"
   }
 

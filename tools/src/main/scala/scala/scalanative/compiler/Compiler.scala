@@ -9,6 +9,7 @@ import linker.Linker
 import nir._, Shows._
 import nir.serialization._
 import util.sh
+import transform._
 
 final class Compiler(opts: Opts) {
   private lazy val entry =
@@ -22,13 +23,7 @@ final class Compiler(opts: Opts) {
     res
   }
 
-  private lazy val passCompanions: Seq[PassCompanion] = Seq(
-      pass.LocalBoxingElimination,
-      pass.DeadCodeElimination,
-      pass.StackallocHoisting)
-
-  private lazy val depends = passCompanions ++ Seq(codegen.LLValGen,
-                                                   codegen.LLDefnGen)
+  private lazy val depends = Seq(codegen.LLValGen, codegen.LLDefnGen)
 
   private lazy val (links, assembly): (Seq[Attr.Link], Seq[Defn]) =
     measure("linking") {
@@ -47,11 +42,14 @@ final class Compiler(opts: Opts) {
                              entry = entry,
                              world = analysis.ClassHierarchy(assembly))
 
-  private lazy val passes = passCompanions.map(_.apply(ctx))
+  private lazy val transform = Transform.compose(
+      DeadCodeElimination(ctx),
+      LocalBoxingElimination(ctx),
+      StackallocHoisting(ctx))
 
   private def gencode(assembly: Seq[Defn]): Unit = measure("codegen") {
     def serialize(defns: Seq[Defn], bb: ByteBuffer): Unit = {
-      val gen = new LLCodeGen(assembly, ctx.entry)(ctx.world)
+      val gen = new LLCodeGen(assembly, ctx.entry, transform)(ctx.world)
       gen.gen(bb)
     }
     serializeFile(serialize _, assembly, opts.outpath)
@@ -65,26 +63,9 @@ final class Compiler(opts: Opts) {
   }
 
   def apply(): Seq[Attr.Link] = measure("total") {
-    def loop(assembly: Seq[Defn], passes: Seq[(Pass, Int)]): Seq[Defn] =
-      passes match {
-        case Seq() =>
-          assembly
-
-        case (pass, id) +: rest =>
-          val nassembly =
-            measure(s"pass: ${passCompanions(id)}")(pass(assembly))
-          val n      = id + 1
-          val padded = if (n < 10) "0" + n else "" + n
-
-          loop(nassembly, rest)
-      }
-
     val assembly = this.assembly
-    val transformed = measure("transformations") {
-      loop(assembly, passes.zipWithIndex)
-    }
 
-    gencode(transformed)
+    gencode(assembly)
 
     links
   }
