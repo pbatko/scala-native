@@ -235,7 +235,8 @@ trait LLInstGen { self: LLCodeGen =>
         val index = sh"i32 ${fld.index + 1}"
 
         ll.inst(typtr, sh"bitcast $obj to $rtty*")
-        ll.inst(fieldptr, sh"getelementptr $rtty, $rtty* %$typtr, i32 0, $index")
+        ll.inst(fieldptr,
+                sh"getelementptr $rtty, $rtty* %$typtr, i32 0, $index")
         ll.inst(name, sh"bitcast ${fld.ty}* %$fieldptr to i8*")
 
       case Op.Sizeof(ty) =>
@@ -394,8 +395,6 @@ trait LLInstGen { self: LLCodeGen =>
   }
 
   implicit def genConv: Show[Conv] = nir.Shows.showConv
-
-  implicit def genAttrSeq: Show[Seq[Attr]] = nir.Shows.showAttrSeq
 }
 
 object LLInstGen {

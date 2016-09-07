@@ -27,9 +27,8 @@ final class Compiler(opts: Opts) {
       pass.DeadCodeElimination,
       pass.StackallocHoisting)
 
-  private lazy val depends = passCompanions ++ Seq(
-      codegen.LLValGen,
-      codegen.LLDefnGen)
+  private lazy val depends = passCompanions ++ Seq(codegen.LLValGen,
+                                                   codegen.LLDefnGen)
 
   private lazy val (links, assembly): (Seq[Attr.Link], Seq[Defn]) =
     measure("linking") {
@@ -46,13 +45,13 @@ final class Compiler(opts: Opts) {
 
   private lazy val ctx = Ctx(fresh = Fresh("tx"),
                              entry = entry,
-                             top = analysis.ClassHierarchy(assembly))
+                             world = analysis.ClassHierarchy(assembly))
 
   private lazy val passes = passCompanions.map(_.apply(ctx))
 
   private def gencode(assembly: Seq[Defn]): Unit = measure("codegen") {
     def serialize(defns: Seq[Defn], bb: ByteBuffer): Unit = {
-      val gen = new LLCodeGen(assembly, ctx.entry)(ctx.top)
+      val gen = new LLCodeGen(assembly, ctx.entry)(ctx.world)
       gen.gen(bb)
     }
     serializeFile(serialize _, assembly, opts.outpath)

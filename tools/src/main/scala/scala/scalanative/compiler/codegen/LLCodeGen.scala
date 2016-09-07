@@ -8,13 +8,14 @@ import scala.reflect.ClassTag
 import util.{unsupported, unreachable, sh, Show}
 import util.Show.{Sequence => s, Indent => i, Unindent => ui, Repeat => r, Newline => nl}
 import compiler.analysis._
-import ClassHierarchy.{Top, Class, Trait}
+import ClassHierarchy.{World, Class, Trait}
 import ClassHierarchyExtractors._
 import ControlFlow.{Graph => CFG}
 import nir.Shows.brace
 import nir._
 
-class LLCodeGen(val assembly: Seq[Defn], val entry: Global)(implicit val top: Top)
+class LLCodeGen(val assembly: Seq[Defn], val entry: Global)(
+    implicit val world: World)
     extends LLDefnGen
     with LLInstGen
     with LLTypeGen

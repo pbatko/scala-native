@@ -12,7 +12,7 @@ import nir._, Shows.brace
 
 trait LLDefnGen { self: LLCodeGen =>
   import LLDefnGen._
-  import top.{traits, classes, methods}
+  import world.{traits, classes, methods}
 
   private lazy val gxxpersonality =
     sh"personality i8* bitcast (i32 (...)* @__gxx_personality_v0 to i8*)"
@@ -78,36 +78,37 @@ trait LLDefnGen { self: LLCodeGen =>
     val rt     = Val.Local(fresh(), Rt)
     val arr    = Val.Local(fresh(), ObjectArray)
 
-    val blocks =
-        Seq(
-            Block(fresh(),
-                  Seq(argc, argv),
-                  Seq(Inst(rt.name, Op.Module(Rt.name)),
-                      Inst(arr.name,
-                           Op.Call(initSig, init, Seq(rt, argc, argv))),
-                      Inst(module.name, Op.Module(entry.top)),
-                      Inst(Op.Call(mainTy, main, Seq(module, arr)))),
-                  Cf.Ret(Val.I32(0))))
+    val blocks = Seq(
+        Block(fresh(),
+              Seq(argc, argv),
+              Seq(Inst(rt.name, Op.Module(Rt.name)),
+                  Inst(arr.name, Op.Call(initSig, init, Seq(rt, argc, argv))),
+                  Inst(module.name, Op.Module(entry.top)),
+                  Inst(Op.Call(mainTy, main, Seq(module, arr)))),
+              Cf.Ret(Val.I32(0))))
 
     genFunctionDefn(Attrs.None, mainName, mainSig, blocks)
   }
 
   def genPrelude() = {
-    ll.declare(sh"declare void @scalanative_throw(i8*)")
-    ll.declare(sh"declare i8* @scalanative_alloc(i8*, i64)")
-    ll.declare(sh"declare i32 @llvm.eh.typeid.for(i8*)")
-    ll.declare(sh"declare i32 @__gxx_personality_v0(...)")
-    ll.declare(sh"declare i8* @__cxa_begin_catch(i8*)")
-    ll.declare(sh"declare void @__cxa_end_catch()")
-    ll.const(
-        sh"@_ZTIN11scalanative16ExceptionWrapperE = external constant { i8*, i8*, i8* }")
+    ll.declare(void, scalanative_throw, Seq(i8_*), Seq())
+    ll.declare(i8_*, scalanative_alloc, Seq(i8_*, i64), Seq())
+    ll.declare(i32, llvm_typeid_for, Seq(i8_*), Seq())
+    ll.declare(i32, gxx_personality_v0, Seq(vararg), Seq())
+    ll.declare(i8_*, cxa_begin_catch, Seq(i8_*), Seq())
+    ll.declare(void, cxa_end_catch, Seq(), Seq())
+    ll.global(scalanative_exception_wrapper,
+              sh"{ i8*, i8*, i8* }",
+              s(),
+              isConst = true,
+              isExtern = true)
   }
 
   def genDefn(defn: Defn): Unit = defn match {
     case Defn.Var(attrs, name, ty, rhs) =>
-      genGlobalDefn(name, attrs.isExtern, isConst = false, ty, rhs)
+      genGlobalDefn(name, ty, rhs, isExtern = attrs.isExtern, isConst = false)
     case Defn.Const(attrs, name, ty, rhs) =>
-      genGlobalDefn(name, attrs.isExtern, isConst = true, ty, rhs)
+      genGlobalDefn(name, ty, rhs, isExtern = attrs.isExtern, isConst = true)
     case Defn.Declare(attrs, name, sig) =>
       genFunctionDefn(attrs, name, sig, Seq())
     case Defn.Define(attrs, name, sig, blocks) =>
@@ -129,20 +130,13 @@ trait LLDefnGen { self: LLCodeGen =>
   }
 
   def genGlobalDefn(name: nir.Global,
-                    isExtern: Boolean,
-                    isConst: Boolean,
                     ty: nir.Type,
-                    rhs: nir.Val): Unit = {
+                    init: nir.Val,
+                    isExtern: Boolean,
+                    isConst: Boolean): Unit = {
     val stripped = if (isExtern) stripExtern(name) else name
-    val external = if (isExtern) "external " else ""
-    val keyword  = if (isConst) "constant" else "global"
-    val init = rhs match {
-      case Val.None => sh"$ty"
-      case _        => sh"$rhs"
-    }
-    val res = sh"@$stripped = $external$keyword $init"
 
-    if (isConst) ll.const(res) else ll.global(res)
+    ll.global(name, ty, init, isConst, isExtern)
   }
 
   def genFunctionDefn(attrs: Attrs,
@@ -151,29 +145,26 @@ trait LLDefnGen { self: LLCodeGen =>
                       blocks: Seq[Block]): Unit = {
     val Type.Function(argtys, retty) = sig
 
-    val returnsVoid = retty.isUnit || retty.isNothing
-    val stripped    = if (attrs.isExtern) stripExtern(name) else name
-    val isDecl      = blocks.isEmpty
-    val keyword     = if (isDecl) "declare" else "define"
-    val params =
-      if (isDecl) r(argtys, sep = ", ")
-      else r(blocks.head.params: Seq[Val], sep = ", ")
-    val postattrs: Seq[Attr] =
-      if (attrs.inline != Attr.MayInline) Seq(attrs.inline) else Seq()
-    val personality = if (attrs.isExtern || isDecl) s() else gxxpersonality
-    val body: Res =
-      if (isDecl) s()
-      else {
-        s(" ", brace(genBody(blocks, returnsVoid)))
-      }
-    val ret = if (returnsVoid) sh"void" else retty: Res
-    val res = sh"$keyword $ret @$stripped($params)$postattrs$personality$body"
+    val retsvoid = retty.isUnit || retty.isNothing
+    val llretty  = if (retsvoid) sh"void" else retty: Res
+    val llname   = if (attrs.isExtern) stripExtern(name) else name
+    val llattrs  = {
+      val inline =
+        if (attrs.inline == Attr.MayInline) Seq() else Seq((attrs.inline: Attr): Res)
+      val personality = if (attrs.isExtern) Seq() else Seq(gxxpersonality: Res)
+      inline ++ personality
+    }
 
-    if (isDecl) ll.declare(res) else ll.define(res)
+    if (blocks.isEmpty) {
+      ll.declare(llretty, llname, argtys, llattrs)
+    } else {
+      ll.define(llretty, llname, argtys, llattrs, genBody(blocks, retsvoid))
+    }
   }
 
-  def genStruct(name: Global, tys: Seq[Type]): Unit =
-    ll.struct(sh"%$name = type {${r(tys, sep = ", ")}}")
+  def genStruct(name: Global, tys: Seq[Type]): Unit = {
+    ll.struct(name, tys)
+  }
 
   def genClass(cls: Class): Unit = {
     genStruct(cls.classStruct.name, cls.classStruct.tys)
@@ -187,14 +178,14 @@ trait LLDefnGen { self: LLCodeGen =>
 
   def genModuleValue(cls: Class): Unit = {
     val clsName = cls.name
-    val clsTy   = Type.Class(clsName)
-    val clsNull = Val.Zero(clsTy)
+    val clsTy   = Type.Class(clsName): Type
+    val clsNull = Val.Zero(clsTy): Val
 
     val valueName = clsName tag "value"
     val valueDefn = Defn.Var(Attrs.None, valueName, clsTy, clsNull)
     val value     = Val.Global(valueName, Type.Ptr)
 
-    genGlobalDefn(valueName, false, false, clsTy, clsNull)
+    ll.global(valueName, clsTy, clsNull, isConst = false, isExtern = false)
   }
 
   def genModuleLoad(cls: Class): Unit = {
@@ -218,7 +209,7 @@ trait LLDefnGen { self: LLCodeGen =>
       ll.block(initialize)
       genInst(alloc, Op.Classalloc(name))
       ll.inst(sh"store i8* %$alloc, i8** $value")
-      if (top.nodes.contains(name tag "init")) {
+      if (world.nodes.contains(name tag "init")) {
         val init = genJustGlobal(name member "init")
         ll.invoke(sh"void (i8*) $init(i8* %$alloc)")
       }
@@ -227,28 +218,48 @@ trait LLDefnGen { self: LLCodeGen =>
       ll.endBody()
     }
 
-    ll.define(sh"define i8* @$load()$gxxpersonality$body")
+    ll.define(i8_*, load, Seq(), Seq(), body)
   }
 
   def genTrait(trt: Trait): Unit = ()
 
   def genRuntimeTypeInfo(node: Node): Unit = node match {
     case cls: Class =>
-      val typeDefn = Defn.Const(Attrs.None, cls.name tag "type", cls.typeStruct, cls.typeValue)
+      val typeDefn = Defn
+        .Const(Attrs.None, cls.name tag "type", cls.typeStruct, cls.typeValue)
 
       genDefn(typeDefn)
 
     case _ =>
-      val typeId   = Val.I32(node.id)
-      val typeStr  = Val.String(node.name.id)
-      val typeVal  = Val.Struct(nir.Rt.Type.name, Seq(typeId, typeStr))
-      val typeDefn = Defn.Const(Attrs.None, node.name tag "type", nir.Rt.Type, typeVal)
+      val typeId  = Val.I32(node.id)
+      val typeStr = Val.String(node.name.id)
+      val typeVal = Val.Struct(nir.Rt.Type.name, Seq(typeId, typeStr))
+      val typeDefn =
+        Defn.Const(Attrs.None, node.name tag "type", nir.Rt.Type, typeVal)
 
       genDefn(typeDefn)
   }
+
+  implicit def genAttrSeq: Show[Seq[Attr]] = nir.Shows.showAttrSeq
+  implicit def genAttr: Show[Attr] = nir.Shows.showAttr
 }
 
 object LLDefnGen extends Depends {
+  val void   = sh"void"
+  val i32    = sh"i32"
+  val i64    = sh"i64"
+  val i8_*   = sh"i8_*"
+  val vararg = sh"..."
+
+  val scalanative_throw  = Global.Top("scalanative_throw")
+  val scalanative_alloc  = Global.Top("scalanative_alloc")
+  val llvm_typeid_for    = Global.Top("llvm.typeid.for")
+  val gxx_personality_v0 = Global.Top("__gxx_personality_v0")
+  val cxa_begin_catch    = Global.Top("__cxa_begin_catch")
+  val cxa_end_catch      = Global.Top("__cxa_end_catch")
+  val scalanative_exception_wrapper =
+    Global.Top("_ZTIN11scalanative16ExceptionWrapperE")
+
   val dispatchName = Global.Top("__dispatch")
   val instanceName = Global.Top("__instance")
 
@@ -263,11 +274,10 @@ object LLDefnGen extends Depends {
   val mainName = Global.Top("main")
   val mainSig  = Type.Function(Seq(Type.I32, Type.Ptr), Type.I32)
 
-  val unitName = Global.Top("scala.scalanative.runtime.BoxedUnit$")
-  val unit     = Val.Global(unitName, Type.Ptr)
-  val unitTy   = Type.Struct(unitName, Seq(Type.Ptr))
-  val unitConst =
-    Val.Global(unitName tag "type", Type.Ptr)
+  val unitName  = Global.Top("scala.scalanative.runtime.BoxedUnit$")
+  val unit      = Val.Global(unitName, Type.Ptr)
+  val unitTy    = Type.Struct(unitName, Seq(Type.Ptr))
+  val unitConst = Val.Global(unitName tag "type", Type.Ptr)
   val unitValue = Val.Struct(unitTy.name, Seq(unitConst))
   val unitDefn  = Defn.Const(Attrs.None, unitName, unitTy, unitValue)
 

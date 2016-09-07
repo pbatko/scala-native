@@ -5,27 +5,34 @@ package codegen
 import scala.collection.mutable.{UnrolledBuffer => Buf, Map}
 import util.{unsupported, unreachable, sh, Show}
 import util.Show.{Sequence => s, Indent => i, Unindent => ui, Repeat => r, Newline => nl, Result => Res}
-import nir._
+import nir._, Shows.brace
 
 final class LLBuilder(fresh: Fresh) {
-  // current definition state
+
+  // Current definition state
+
   private val declares = Buf.empty[Res]
   private val defines  = Buf.empty[Res]
   private val consts   = Buf.empty[Res]
   private val globals  = Buf.empty[Res]
   private val structs  = Buf.empty[Res]
+  private val tys      = Map.empty[Global, Res]
 
-  // current body state
+  // Current body state
+
   private val edges    = Map.empty[Local, Buf[(Local, Seq[Res])]]
   private val blocks   = Buf.empty[LLBlock]
   private val handlers = Map.empty[Local, Option[Local]]
 
-  // current basic block state
+  // Current basic block state
+
   private var name: Local               = _
   private var params: Seq[(Local, Res)] = _
   private var insts: Buf[Res]           = _
   private var isEntry: Boolean          = _
   private var handler: Option[Local]    = None
+
+  // Helpers
 
   private def edge(to: Local, values: Seq[Res] = Seq.empty): Unit = {
     if (!edges.contains(to)) {
@@ -36,6 +43,18 @@ final class LLBuilder(fresh: Fresh) {
 
   private def exchandler(to: Local, handler: Local): Unit =
     handlers(to) = Some(handler)
+
+  private implicit val showLocal: Show[Local] = Show {
+    case Local(scope, id) => sh"$scope.$id"
+  }
+
+  private implicit val showGlobal: Show[Global] = Show {
+    case n @ Global.None      => unsupported(n)
+    case Global.Top(id)       => id
+    case Global.Member(n, id) => s(n, "::", id)
+  }
+
+  // Definitions
 
   def start() = {
     declares.clear()
@@ -55,20 +74,43 @@ final class LLBuilder(fresh: Fresh) {
     r(res, sep = nl(""))
   }
 
-  def declare(value: Res): Unit =
-    declares += value
+  def declare(retty: Res,
+              name: Global,
+              argtys: Seq[Res],
+              attrs: Seq[Res]): Unit = {
+    val arglist  = r(argtys, sep = ", ")
+    val attrlist = r(attrs, sep = " ", pre = " ")
+    declares += sh"declare $retty @$name($arglist)$attrlist"
+    tys(name) = sh"$retty ($arglist)"
+  }
 
-  def define(value: Res): Unit =
-    defines += value
+  def define(retty: Res,
+             name: Global,
+             argtys: Seq[Res],
+             attrs: Seq[Res],
+             body: Res): Unit = {
+    val arglist  = r(argtys, sep = ", ")
+    val attrlist = r(attrs, sep = " ", pre = " ")
+    defines += sh"define $retty @$name($arglist)$attrlist ${brace(body)}"
+    tys(name) = sh"$retty ($arglist)"
+  }
 
-  def const(value: Res): Unit =
-    consts += value
+  def global(name: Global,
+             ty: Res,
+             init: Res,
+             isConst: Boolean = false,
+             isExtern: Boolean = false): Unit = {
+    val keyword  = if (isConst) "constant" else "global"
+    val external = if (isExtern) "external " else ""
+    globals += sh"@$name = ${external}global $ty$init"
+    tys(name) = ty
+  }
 
-  def global(value: Res): Unit =
-    globals += value
+  def struct(n: Global, tys: Seq[Res]): Unit = {
+    structs += sh"%$name = type {${r(tys, sep = ", ")}}"
+  }
 
-  def struct(value: Res): Unit =
-    structs += value
+  // Basic blocks
 
   def startBody(): Unit = {
     edges.clear()
@@ -115,6 +157,8 @@ final class LLBuilder(fresh: Fresh) {
     this.handler = handlers.getOrElse(name, this.handler)
     blocks += LLBlock(name, params, this.insts, isEntry)
   }
+
+  // Instructions
 
   def inst(op: Res): Unit =
     insts += op
@@ -175,9 +219,9 @@ final class LLBuilder(fresh: Fresh) {
     insts += sh"switch $scrut, label %$default [${r(pairs.map(i(_)))}${nl("]")}"
   }
 
-  private implicit val showLocal: Show[Local] = Show {
-    case Local(scope, id) => sh"$scope.$id"
-  }
+  // Values
+
+  def global(n: Global): Res = sh"${tys(n)}* @$n"
 }
 
 final case class LLBlock(name: Local,

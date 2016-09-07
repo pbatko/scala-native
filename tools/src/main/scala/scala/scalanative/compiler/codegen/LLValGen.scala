@@ -12,7 +12,7 @@ import compiler.analysis.ClassHierarchyExtractors._
 trait LLValGen { self: LLCodeGen =>
   import LLValGen._
 
-  private val consts  = mutable.Map.empty[Val, Res]
+  private val consts = mutable.Map.empty[Val, Res]
   private var constid = 0
 
   private lazy val stringFieldNames = {
@@ -29,13 +29,6 @@ trait LLValGen { self: LLCodeGen =>
     "0x" + jl.Long.toHexString(jl.Double.doubleToRawLongBits(value))
 
   private def quoted(sh: Res) = s("\"", sh, "\"")
-
-  protected lazy val globals = assembly.collect {
-    case Defn.Var(_, n, ty, _)     => n -> ty
-    case Defn.Const(_, n, ty, _)   => n -> ty
-    case Defn.Declare(_, n, sig)   => n -> sig
-    case Defn.Define(_, n, sig, _) => n -> sig
-  }.toMap
 
   def genJustVal(v: Val): Res = v match {
     case Val.Unit                            => genJustVal(LLDefnGen.unit)
@@ -58,8 +51,9 @@ trait LLValGen { self: LLCodeGen =>
     case Val.Local(n, ty)                    => sh"%$n"
     case Val.Global(ScopeRef(node), _)       => typeConst(node)
     case Val.Global(n, ty) =>
-      sh"bitcast (${globals(n)}* ${genJustGlobal(n)} to i8*)"
-    case _ => unsupported(v)
+      sh"bitcast (${ll.global(n)} to i8*)"
+    case _ =>
+      unsupported(v)
   }
 
   def genConst(v: Val): Res = {
@@ -68,7 +62,7 @@ trait LLValGen { self: LLCodeGen =>
     } else {
       val id = constid
       constid += 1
-      ll.global(sh"@__const.$id = constant $v")
+      ll.global(Global.Top("__const.$id"), v.ty, v)
       val res = sh"bitcast (${v.ty}* @__const.$id to i8*)"
       consts(v) = res
       res

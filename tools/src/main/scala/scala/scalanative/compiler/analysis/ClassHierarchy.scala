@@ -11,7 +11,7 @@ object ClassHierarchy {
     var id: Int   = -1
     var in: Scope = _
 
-    def inTop: Boolean   = in.isInstanceOf[Top]
+    def inWorld: Boolean = in.isInstanceOf[World]
     def inClass: Boolean = in.isInstanceOf[Class]
     def inTrait: Boolean = in.isInstanceOf[Trait]
     def attrs: Attrs
@@ -100,8 +100,7 @@ object ClassHierarchy {
     lazy val typeValue: Val.Struct = Val
       .Struct(Global.None, Seq(Val.I32(id), Val.String(name.id), vtableValue))
 
-    lazy val typeConst: Val =
-      Val.Global(name tag "type", Type.Ptr)
+    lazy val typeConst: Val = Val.Global(name tag "type", Type.Ptr)
 
     lazy val vtable: Seq[Val] = {
       val base = parent.fold(Seq.empty[Val])(_.vtable)
@@ -200,18 +199,18 @@ object ClassHierarchy {
     }
   }
 
-  final class Top(val nodes: mutable.Map[Global, Node],
-                  val structs: Seq[Struct],
-                  val classes: Seq[Class],
-                  val traits: Seq[Trait],
-                  override val methods: Seq[Method],
-                  override val fields: Seq[Field])
+  final class World(val nodes: mutable.Map[Global, Node],
+                    val structs: Seq[Struct],
+                    val classes: Seq[Class],
+                    val traits: Seq[Trait],
+                    override val methods: Seq[Method],
+                    override val fields: Seq[Field])
       extends Scope {
     def name  = Global.None
     def attrs = Attrs.None
   }
 
-  def apply(defns: Seq[Defn]): Top = {
+  def apply(defns: Seq[Defn]): World = {
     val nodes   = mutable.Map.empty[Global, Node]
     val structs = mutable.UnrolledBuffer.empty[Struct]
     val classes = mutable.UnrolledBuffer.empty[Class]
@@ -270,12 +269,12 @@ object ClassHierarchy {
     }
 
     defns.foreach(enterDefn)
-    val top = new Top(nodes = nodes,
-                      structs = structs,
-                      classes = classes,
-                      traits = traits,
-                      methods = methods,
-                      fields = fields)
+    val top = new World(nodes = nodes,
+                        structs = structs,
+                        classes = classes,
+                        traits = traits,
+                        methods = methods,
+                        fields = fields)
     top.members = nodes.values.toSeq
 
     def enrichMethods(): Unit = methods.foreach { node =>
