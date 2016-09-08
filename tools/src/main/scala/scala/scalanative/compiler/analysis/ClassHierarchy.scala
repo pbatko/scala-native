@@ -145,13 +145,15 @@ object ClassHierarchy {
     }
   }
 
-  final class Method(val attrs: Attrs,
+  final case class Method(val attrs: Attrs,
                      val name: Global,
-                     val ty: nir.Type,
-                     val isConcrete: Boolean)
+                     val sig: nir.Type,
+                     val blocks: Seq[Block] = Seq.empty)
       extends Node {
     var overrides: Seq[Method] = Seq()
     var overriden: Seq[Method] = Seq()
+
+    def isConcrete = blocks.nonEmpty
 
     def isVirtual = !isConcrete || overriden.nonEmpty
 
@@ -191,7 +193,7 @@ object ClassHierarchy {
     }
   }
 
-  final class Var(val attrs: Attrs, val name: Global, val ty: nir.Type)
+  final case class Var(attrs: Attrs, name: Global, ty: nir.Type, rhs: Val)
       extends Node {
     def index = {
       assert(inClass)
@@ -199,7 +201,7 @@ object ClassHierarchy {
     }
   }
 
-  final class Const(val attrs: Attrs, val name: Global, val ty: nir.Type) extends Node
+  final case class Const(attrs: Attrs, name: Global, ty: nir.Type, rhs: Val) extends Node
 
   final class World(val nodes: mutable.Map[Global, Node],
                     val structs: Seq[Struct],
@@ -211,6 +213,8 @@ object ClassHierarchy {
       extends Scope {
     def name  = Global.None
     def attrs = Attrs.None
+
+    lazy val traitMethods = methods.filter(_.inTrait)
   }
 
   def apply(defns: Seq[Defn]): World = {
@@ -257,20 +261,20 @@ object ClassHierarchy {
 
       case defn: Defn.Declare =>
         enter(defn.name,
-              new Method(defn.attrs, defn.name, defn.ty, isConcrete = false))
+              new Method(defn.attrs, defn.name, defn.ty))
 
       case defn: Defn.Define =>
         enter(defn.name,
-              new Method(defn.attrs, defn.name, defn.ty, isConcrete = true))
+              new Method(defn.attrs, defn.name, defn.ty, defn.blocks))
 
       case defn: Defn.Struct =>
         enter(defn.name, new Struct(defn.attrs, defn.name, defn.tys))
 
       case defn: Defn.Var =>
-        enter(defn.name, new Var(defn.attrs, defn.name, defn.ty))
+        enter(defn.name, new Var(defn.attrs, defn.name, defn.ty, defn.init))
 
       case defn: Defn.Const =>
-        enter(defn.name, new Const(defn.attrs, defn.name, defn.ty))
+        enter(defn.name, new Const(defn.attrs, defn.name, defn.ty, defn.init))
     }
 
     defns.foreach(enterDefn)

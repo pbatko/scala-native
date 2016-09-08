@@ -12,7 +12,6 @@ import nir._, Shows.brace
 
 trait LLDefnGen { self: LLCodeGen =>
   import LLDefnGen._
-  import world.{traits, classes, methods}
 
   private lazy val gxxpersonality =
     sh"personality i8* bitcast (i32 (...)* @__gxx_personality_v0 to i8*)"
@@ -24,46 +23,29 @@ trait LLDefnGen { self: LLCodeGen =>
     Global.Top(id.substring(7))
   }
 
-  lazy val (dispatchTy, dispatchDefn) = {
-    val traitMethods = methods.filter(_.inTrait).sortBy(_.id)
+  lazy val dispatchTy =
+    sh"[${world.traitMethods.length} x [${world.classes.length} x i8*]]"
+  lazy val dispatch =
+    sh"$dispatchTy* @${dispatchName: Global}"
 
-    val columns = classes.sortBy(_.id).map { cls =>
-      val row = Array.fill[Val](traitMethods.length)(Val.Null)
-      cls.imap.foreach {
-        case (meth, value) =>
-          row(meth.id) = value
-      }
-      Val.Array(Type.Ptr, row)
-    }
-    val value = Val.Array(Type.Array(Type.Ptr, traitMethods.length), columns)
-    val defn  = Defn.Const(Attrs.None, dispatchName, value.ty, value)
-
-    (value.ty, defn)
-  }
-
-  lazy val (instanceTy, instanceDefn) = {
-    val columns = classes.sortBy(_.id).map { cls =>
-      val row = new Array[Boolean](traits.length)
-      cls.alltraits.foreach { trt =>
-        row(trt.id) = true
-      }
-      Val.Array(Type.Bool, row.map(Val.Bool))
-    }
-    val value = Val.Array(Type.Array(Type.Bool, traits.length), columns)
-    val defn  = Defn.Const(Attrs.None, instanceName, value.ty, value)
-
-    (value.ty, defn)
-  }
-
-  lazy val dispatch = sh"$dispatchTy* @${dispatchName: Global}"
-  lazy val instance = sh"$instanceTy* @${instanceName: Global}"
+  lazy val instanceTy =
+    sh"[${world.traits.length} x [${world.classes.length} x i1]]"
+  lazy val instance =
+    sh"$instanceTy* @${instanceName: Global}"
 
   def genWorld(): Res = {
+    import world._
+
     ll.start()
     genPrelude()
-    assembly.foreach(genDefn(_))
-    genDefn(instanceDefn)
-    genDefn(dispatchDefn)
+    classes.foreach(genNode)
+    traits.foreach(genNode)
+    structs.foreach(genNode)
+    vars.foreach(genNode)
+    consts.foreach(genNode)
+    methods.foreach(genNode)
+    genDispatchTable()
+    genInstanceTable()
     genMain()
     ll.end()
   }
@@ -87,7 +69,7 @@ trait LLDefnGen { self: LLCodeGen =>
                   Inst(Op.Call(mainTy, main, Seq(module, arr)))),
               Cf.Ret(Val.I32(0))))
 
-    genFunctionDefn(Attrs.None, mainName, mainSig, blocks)
+    genMethod(Attrs.None, mainName, mainSig, blocks)
   }
 
   def genPrelude() = {
@@ -104,46 +86,44 @@ trait LLDefnGen { self: LLCodeGen =>
               isExtern = true)
   }
 
-  def genDefn(defn: Defn): Unit = defn match {
-    case Defn.Var(attrs, name @ Ref(node), ty, rhs) =>
-      if (node.inWorld)
-        genGlobalDefn(name, ty, rhs, isExtern = attrs.isExtern, isConst = false)
-    case Defn.Const(attrs, name, ty, rhs) =>
-      genGlobalDefn(name, ty, rhs, isExtern = attrs.isExtern, isConst = true)
-    case Defn.Declare(attrs, name, sig) =>
-      genFunctionDefn(attrs, name, sig, Seq())
-    case Defn.Define(attrs, name, sig, blocks) =>
-      genFunctionDefn(attrs, name, sig, blocks)
-    case Defn.Struct(_, name @ StructRef(struct), tys) =>
-      genRuntimeTypeInfo(struct)
-      genStruct(name, tys)
-    case Defn.Class(_, ClassRef(cls), _, _) =>
-      genRuntimeTypeInfo(cls)
-      genClass(cls)
-    case Defn.Module(_, ClassRef(cls), _, _) =>
-      genRuntimeTypeInfo(cls)
-      genModule(cls)
-    case Defn.Trait(_, TraitRef(trt), _) =>
-      genRuntimeTypeInfo(trt)
-      genTrait(trt)
-    case defn =>
-      unsupported(defn)
+  def genNode(node: Node): Unit = {
+    println(s"gen ${node.name} : $node")
+    node match {
+      case Var(attrs, name, ty, rhs) =>
+        if (node.inWorld) {
+          genGlobal(name, ty, rhs, isExtern = attrs.isExtern, isConst = false)
+        }
+      case Const(attrs, name, ty, rhs) =>
+        genGlobal(name, ty, rhs, isExtern = attrs.isExtern, isConst = true)
+      case Method(attrs, name, sig, blocks) =>
+        genMethod(attrs, name, sig, blocks)
+      case struct: Struct =>
+        genRuntimeTypeInfo(struct)
+        genStruct(struct.name, struct.tys)
+      case cls: Class =>
+        genRuntimeTypeInfo(cls)
+        genClass(cls)
+      case trt: Trait =>
+        genRuntimeTypeInfo(trt)
+      case _ =>
+        unsupported(node)
+    }
   }
 
-  def genGlobalDefn(name: nir.Global,
-                    ty: nir.Type,
-                    init: nir.Val,
-                    isExtern: Boolean,
-                    isConst: Boolean): Unit = {
+  def genGlobal(name: nir.Global,
+                ty: nir.Type,
+                init: nir.Val,
+                isExtern: Boolean,
+                isConst: Boolean): Unit = {
     val stripped = if (isExtern) stripExtern(name) else name
 
     ll.global(name, ty, genJustVal(init), isConst, isExtern)
   }
 
-  def genFunctionDefn(attrs: Attrs,
-                      name: Global,
-                      sig: Type,
-                      blocks: Seq[Block]): Unit = {
+  def genMethod(attrs: Attrs,
+                name: Global,
+                sig: Type,
+                blocks: Seq[Block]): Unit = {
     val Type.Function(argtys, retty) = sig
 
     val retsvoid = retty.isUnit || retty.isNothing
@@ -173,14 +153,13 @@ trait LLDefnGen { self: LLCodeGen =>
   }
 
   def genClass(cls: Class): Unit = {
+    if (cls.isModule) {
+      genModuleValue(cls)
+      genModuleAccessor(cls)
+    }
     genStruct(cls.classStruct.name, cls.classStruct.tys)
   }
 
-  def genModule(cls: Class): Unit = {
-    genClass(cls)
-    genModuleValue(cls)
-    genModuleAccessor(cls)
-  }
 
   def genModuleValue(cls: Class): Unit = {
     val name = cls.name tag "value"
@@ -222,23 +201,43 @@ trait LLDefnGen { self: LLCodeGen =>
     ll.define(i8_*, name tag "access", Seq(), Seq(), body)
   }
 
-  def genTrait(trt: Trait): Unit = ()
-
   def genRuntimeTypeInfo(node: Node): Unit = node match {
     case cls: Class =>
-      val typeDefn = Defn
-        .Const(Attrs.None, cls.name tag "type", cls.typeStruct, cls.typeValue)
-
-      genDefn(typeDefn)
+      genGlobal(cls.name tag "type", cls.typeStruct, cls.typeValue, isExtern = false, isConst = true)
 
     case _ =>
       val typeId  = Val.I32(node.id)
       val typeStr = Val.String(node.name.id)
       val typeVal = Val.Struct(nir.Rt.Type.name, Seq(typeId, typeStr))
-      val typeDefn =
-        Defn.Const(Attrs.None, node.name tag "type", nir.Rt.Type, typeVal)
 
-      genDefn(typeDefn)
+      genGlobal(node.name tag "type", nir.Rt.Type, typeVal, isExtern = false, isConst = true)
+  }
+
+  def genDispatchTable(): Unit = {
+    val columns = world.classes.sortBy(_.id).map { cls =>
+      val row = Array.fill[Val](world.traitMethods.length)(Val.Null)
+      cls.imap.foreach {
+        case (meth, value) =>
+          row(meth.id) = value
+      }
+      Val.Array(Type.Ptr, row)
+    }
+    val value = Val.Array(Type.Array(Type.Ptr, world.traitMethods.length), columns)
+
+    genGlobal(dispatchName, value.ty, value, isExtern = false, isConst = true)
+  }
+
+  def genInstanceTable(): Unit = {
+    val columns = world.classes.sortBy(_.id).map { cls =>
+      val row = new Array[Boolean](world.traits.length)
+      cls.alltraits.foreach { trt =>
+        row(trt.id) = true
+      }
+      Val.Array(Type.Bool, row.map(Val.Bool))
+    }
+    val value = Val.Array(Type.Array(Type.Bool, world.traits.length), columns)
+
+    genGlobal(instanceName, value.ty, value, isExtern = false, isConst = true)
   }
 
   implicit def genAttrSeq: Show[Seq[Attr]] = nir.Shows.showAttrSeq

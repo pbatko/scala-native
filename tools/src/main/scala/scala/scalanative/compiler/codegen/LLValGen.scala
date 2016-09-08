@@ -51,7 +51,7 @@ trait LLValGen { self: LLCodeGen =>
     case Val.Local(n, ty)                    => sh"%$n"
     case Val.Global(ScopeRef(node), _)       => typeConst(node)
     case Val.Global(n, ty) =>
-      sh"bitcast (i8* @$n to i8*)"
+      sh"bitcast (${ll.global(n)} to i8*)"
     case _ =>
       unsupported(v)
   }
@@ -100,6 +100,7 @@ trait LLValGen { self: LLCodeGen =>
   }
 
   implicit val genVal: Show[Val] = Show { v =>
+    println(s"gen value $v")
     sh"${v.ty} ${genJustVal(v)}"
   }
 
