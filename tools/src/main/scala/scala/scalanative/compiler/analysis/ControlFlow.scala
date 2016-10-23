@@ -119,8 +119,8 @@ object ControlFlow {
               edge(node, nodes(succ.name), succ)
               edge(node, nodes(fail.name), fail)
             case Inst.Try(next1, next2) =>
-              edge(node, nodes(next1.name), next1)
               edge(node, nodes(next2.name), next2)
+              edge(node, nodes(next1.name), next1)
             case inst =>
               unsupported(inst)
           }
